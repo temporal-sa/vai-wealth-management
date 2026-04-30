@@ -1,2 +1,9 @@
 lib
 node_modules
+setllmkey.sh
+src/temporal_supervisor/setcloudenv.sh
+src/temporal_supervisor/setclaimcheck.sh
+__pycache__
+.venv
+.idea
+.DS_Store

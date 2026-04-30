@@ -8,10 +8,13 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "lint": "eslint .",
-    "start": "ts-node src/worker.ts",
-    "start.watch": "nodemon src/worker.ts",
-    "workflow": "ts-node src/client.ts",
-    "test": "mocha --exit --require ts-node/register --require source-map-support/register src/mocha/*.test.ts"
+    "vai": "ts-node src/vai_supervisor/main.ts",
+    "temporal:worker": "ts-node src/temporal_supervisor/worker.ts",
+    "temporal:worker.watch": "nodemon src/temporal_supervisor/worker.ts",
+    "start": "ts-node src/temporal_supervisor/worker.ts",
+    "start.watch": "nodemon src/temporal_supervisor/worker.ts",
+    "test": "mocha --exit --require ts-node/register --require source-map-support/register src/temporal_supervisor/mocha/*.test.ts",
+    "compliance.approval": "ts-node src/temporal_supervisor/run_send_compliance_approval.ts"
   },
   "nodemonConfig": {
     "execMap": {
@@ -23,15 +26,21 @@
     ]
   },
   "dependencies": {
+    "@ai-sdk/google": "^3.0.63",
     "@temporalio/activity": "^1.16.0",
     "@temporalio/client": "^1.16.0",
     "@temporalio/envconfig": "^1.16.0",
     "@temporalio/worker": "^1.16.0",
     "@temporalio/workflow": "^1.16.0",
-    "nanoid": "3.x"
+    "@types/ioredis": "^4.28.10",
+    "ai": "^6.0.159",
+    "ioredis": "^5.10.1",
+    "nanoid": "3.x",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@temporalio/testing": "^1.16.0",
+    "@tsconfig/node20": "^20.0.0",
     "@types/mocha": "8.x",
     "@types/node": "^22.9.1",
     "@typescript-eslint/eslint-plugin": "^8.18.0",
@@ -43,7 +52,6 @@
     "nodemon": "^3.1.7",
     "prettier": "^3.4.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.6.3",
-    "@tsconfig/node20": "^20.0.0"
+    "typescript": "^5.6.3"
   }
 }
