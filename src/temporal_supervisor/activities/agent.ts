@@ -16,7 +16,7 @@ import { ClientHelper } from '../../common/client-helper';
 import { BeneficiariesManager } from '../../common/beneficiaries-manager';
 import { InvestmentManager } from '../../common/investment-manager';
 import { ClientsManager } from '../../common/clients-manager';
-import { ChatInteraction, TASK_QUEUE_NAME } from '../shared';
+import { ChatInteraction, START_CHILD_WORKFLOW_UPDATE, StartChildWorkflowInput } from '../shared';
 
 // ---------------------------------------------------------------------------
 // Managers
@@ -131,11 +131,12 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
         ctx.childWorkflowId = childId;
         ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childId}`);
         const temporalClient = await getTemporalClient();
-        await temporalClient.workflow.start('OpenInvestmentAccountWorkflow', {
-          taskQueue: TASK_QUEUE_NAME,
+        const parentHandle = temporalClient.workflow.getHandle(ctx.parentWorkflowId);
+        const updateInput: StartChildWorkflowInput = {
           workflowId: childId,
-          args: [{ client_id, account_name, initial_amount, parent_workflow_id: ctx.parentWorkflowId }],
-        });
+          workflowInput: { client_id, account_name, initial_amount, parent_workflow_id: ctx.parentWorkflowId },
+        };
+        await parentHandle.executeUpdate(START_CHILD_WORKFLOW_UPDATE, { args: [updateInput] });
         return { child_workflow_id: childId, message: 'Account opening process started.' };
       },
     }),

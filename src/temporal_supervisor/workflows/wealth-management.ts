@@ -1,8 +1,10 @@
 import {
   defineSignal,
+  defineUpdate,
   setHandler,
   condition,
   proxyActivities,
+  startChild,
   workflowInfo,
   log,
 } from '@temporalio/workflow';
@@ -11,11 +13,14 @@ import type {
   UpdateStatusInput,
   ChatInteraction,
   StatusUpdate,
+  StartChildWorkflowInput,
 } from '../shared';
 import {
   PROCESS_USER_MESSAGE_SIGNAL,
   END_WORKFLOW_SIGNAL,
   UPDATE_STATUS_SIGNAL,
+  START_CHILD_WORKFLOW_UPDATE,
+  TASK_QUEUE_NAME,
 } from '../shared';
 import type * as agentActivities from '../activities/agent';
 import type * as eventStreamActivities from '../activities/event-stream';
@@ -37,6 +42,7 @@ const { appendChatInteraction, appendStatusUpdate, deleteConversation } =
 const processUserMessageSignal = defineSignal<[ProcessUserMessageInput]>(PROCESS_USER_MESSAGE_SIGNAL);
 const endWorkflowSignal = defineSignal(END_WORKFLOW_SIGNAL);
 const updateStatusSignal = defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL);
+const startChildWorkflowUpdate = defineUpdate<void, [StartChildWorkflowInput]>(START_CHILD_WORKFLOW_UPDATE);
 
 // ---------------------------------------------------------------------------
 // Workflow — type name matches Python's WealthManagementWorkflow exactly
@@ -66,6 +72,15 @@ export async function WealthManagementWorkflow(): Promise<void> {
   setHandler(updateStatusSignal, (input: UpdateStatusInput) => {
     log.info('Signal received: update_status', { status: input.status });
     pendingStatuses.push(input);
+  });
+
+  setHandler(startChildWorkflowUpdate, async ({ workflowId: childId, workflowInput }) => {
+    await startChild('OpenInvestmentAccountWorkflow', {
+      workflowId: childId,
+      taskQueue: TASK_QUEUE_NAME,
+      args: [workflowInput],
+    });
+    log.info('Child workflow started', { childWorkflowId: childId });
   });
 
   log.info('WealthManagementWorkflow started', { workflowId });
