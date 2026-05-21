@@ -2,6 +2,7 @@ import { loadClientConnectConfig } from '@temporalio/envconfig';
 import { Connection, Client } from '@temporalio/client';
 import type { NativeConnectionOptions } from '@temporalio/worker';
 import { TASK_QUEUE_NAME } from '../temporal_supervisor/shared';
+import { buildDataConverter } from './data-converter';
 
 const DEFAULT_ADDRESS = 'localhost:7233';
 const DEFAULT_NAMESPACE = 'default';
@@ -23,7 +24,7 @@ export class ClientHelper {
   async connectClient(): Promise<{ connection: Connection; client: Client }> {
     const { address, tls, metadata, apiKey } = this.nativeConnectionOptions;
     const connection = await Connection.connect({ address, tls, metadata, apiKey });
-    const client = new Client({ connection, namespace: this.namespace });
+    const client = new Client({ connection, namespace: this.namespace, dataConverter: buildDataConverter() });
     return { connection, client };
   }
 }

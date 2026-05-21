@@ -2,6 +2,7 @@ import { NativeConnection, Worker, Runtime, DefaultLogger } from '@temporalio/wo
 import type { LogEntry } from '@temporalio/worker';
 import * as activities from './activities/activities';
 import { ClientHelper } from '../common/client-helper';
+import { buildDataConverter } from '../common/data-converter';
 
 // ---------------------------------------------------------------------------
 // Concise logger — strip SDK-internal metadata, one line per entry
@@ -20,7 +21,18 @@ Runtime.install({
   }),
 });
 
+function logClaimCheckStatus(): void {
+  if (process.env.USE_CLAIM_CHECK === 'true') {
+    const host = process.env.REDIS_HOST ?? 'localhost';
+    const port = process.env.REDIS_PORT ?? '6379';
+    console.error(`Claim check enabled (redis at ${host}:${port})`);
+  } else {
+    console.error('Claim check disabled');
+  }
+}
+
 async function run() {
+  logClaimCheckStatus();
   const helper = new ClientHelper();
   const connection = await NativeConnection.connect(helper.nativeConnectionOptions);
   try {
@@ -30,6 +42,7 @@ async function run() {
       taskQueue: helper.taskQueue,
       workflowsPath: require.resolve('./workflows/index'),
       activities,
+      dataConverter: buildDataConverter(),
     });
 
     await worker.run();
