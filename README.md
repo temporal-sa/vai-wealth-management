@@ -1,23 +1,42 @@
-# Starter project
+# Wealth Management Agent Example using Vercel AI SDK
 
-This is an empty project that is scaffolded out when you run `npx @temporalio/create@latest ./myfolder` and choose the `empty` option.
+A multi-agent wealth-management demo built with the [Vercel AI SDK](https://ai-sdk.dev) and [Temporal](https://temporal.io).
 
-- Add your Activity Definitions to `src/activities.ts`.
-- Add your Workflow Definitions to `src/workflows.ts`.
-- Set your task queue name in `src/shared.ts`.
-- Modify the `src/client.ts` file and replace `YOUR_WORKFLOW` with the name of your Workflow.
-- Add Activity and Workflow tests to the `src/mocha` directory in files with the extension `.test.ts`.
+A supervisor agent routes customer requests to specialist sub-agents (beneficiaries, investments, open account). Two flavors are included:
 
-## Running the code
+- A **non-Temporal CLI** that runs the same agent loop in a single process — useful for iterating on prompts and tools.
+- A **Temporal-integrated** flavor where the agent runs inside a Temporal Workflow as a durable, replayable, long-running conversation. A child workflow handles a multi-step "open new investment account" flow with KYC and compliance checkpoints.
 
-Install dependencies with `npm install`.
+![Architecture](images/architecture.png)
 
-Run `temporal server start-dev` to start [Temporal Server](https://github.com/temporalio/cli/#installation).
+## Prerequisites
 
-The `package.json` file contains scripts for running the client, the Worker, and tests.
+- [Node.js 20+](https://nodejs.org/)
+- [Temporal CLI](https://github.com/temporalio/cli) (only required for the Temporal flavor)
+- [Redis](https://redis.io/) (used by the Temporal flavor for chat history; optionally for the claim-check payload codec)
+- A [Google Gemini API key](https://aistudio.google.com/app/apikey)
 
-1. In a shell, run `npm run start.watch` to start the Worker and reload it when code changes.
-1. In another shell, run `npm run workflow` to run the Workflow Client.
-1. Run `npm run format` to format your code according to the rules in `.prettierrc`.
-1. Run `npm run lint` to lint your code according to the rules in `eslintrc.js`.
-1. Run `npm test` to run the tests.
+## Install dependencies
+
+From the project root:
+
+```bash
+npm install
+```
+
+## Set up your Gemini API key
+
+Create `setllmkey.sh` at the project root with your key:
+
+```bash
+export GOOGLE_GENERATIVE_AI_API_KEY="<your-key-here>"
+```
+
+`setllmkey.sh` is gitignored. The start scripts source it automatically.
+
+## Getting Started
+
+Pick the flavor you want to run:
+
+- **[ADDK Only CLI](src/vai_supervisor/README.md)** — run the agent using ADK via the command line.
+- **[Temporal Version](src/temporal_supervisor/README.md)** — run the durable agent Temporal version

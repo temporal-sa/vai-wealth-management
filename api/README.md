@@ -88,7 +88,7 @@ the codec server.
 From the project root:
 
 ```bash
-cd api 
+cd api
 ./startlocalapi.sh
 ```
 

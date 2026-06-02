@@ -5,7 +5,7 @@ It uses the [API](../api/README.md) to interact with Temporal.
 
 ## Prerequisites 
 
-[Node.js](https://nodejs.org/en/download): Version 14.0.0 or higher.
+[Node.js](https://nodejs.org/en/download): Version 20.0.0 or higher.
 
 The web application relies on the API to communicate with Temporal. 
 Be sure to follow the instructions to run the API, which can be found [here](../api/README.md)
@@ -20,7 +20,7 @@ npm install
 
 ## Running the Web App
 ```bash
-cd src/frontend
+cd frontend
 npm start
 ```
 
@@ -43,7 +43,7 @@ cd src/temporal_supervisor
 
 Here's an example screenshot of the web application running:
 
-![](../../images/webui.png)
+![](../images/webui.png)
 
 ## Comments
 
