@@ -38,5 +38,5 @@ export GOOGLE_GENERATIVE_AI_API_KEY="<your-key-here>"
 
 Pick the flavor you want to run:
 
-- **[ADDK Only CLI](src/vai_supervisor/README.md)** — run the agent using ADK via the command line.
+- **[Vercel AI SDK Only CLI](src/vai_supervisor/README.md)** — run the agent using Vercel AI SDK via the command line.
 - **[Temporal Version](src/temporal_supervisor/README.md)** — run the durable agent Temporal version
