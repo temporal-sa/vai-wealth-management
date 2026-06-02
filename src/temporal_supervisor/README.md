@@ -1,7 +1,7 @@
 # Wealth Management Agent Example using Vercel AI SDK 
 
 Demonstrates how to use [Vercel AI SDK](https://ai-sdk.dev/) with [Temporal](https://temporal.io/) 
-It uns the agent loop inside a Temporal Activity as a durable, replayable, long-running conversation. 
+It runs the agent loop inside a Temporal Activity as a durable, replayable, long-running conversation. 
 It uses tools to hand off to other agents.
 
 Scenarios currently implemented include
