@@ -9,13 +9,18 @@ const HOST = process.env.CODEC_SERVER_HOST ?? '127.0.0.1';
 const PORT = Number(process.env.CODEC_SERVER_PORT ?? 8081);
 const TEMPORAL_UI_ORIGIN = process.env.TEMPORAL_UI_ORIGIN ?? 'http://localhost:8233';
 
+const ALLOWED_ORIGINS = new Set([TEMPORAL_UI_ORIGIN, 'https://cloud.temporal.io']);
+
 const codec = new ClaimCheckCodec(createRedisClient());
 
 function setCorsHeaders(req: IncomingMessage, res: ServerResponse): void {
-  if (req.headers.origin === TEMPORAL_UI_ORIGIN) {
-    res.setHeader('Access-Control-Allow-Origin', TEMPORAL_UI_ORIGIN);
-    res.setHeader('Access-Control-Allow-Methods', 'POST');
-    res.setHeader('Access-Control-Allow-Headers', 'content-type,x-namespace');
+  const origin = req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.has(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'content-type, x-namespace, authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
   }
 }
 
@@ -41,24 +46,27 @@ async function apply(
 
 const server = createServer(async (req, res) => {
   try {
+    const pathname = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`).pathname;
     if (req.method === 'OPTIONS') {
       setCorsHeaders(req, res);
       res.statusCode = 204;
       res.end();
       return;
     }
-    if (req.method === 'POST' && req.url === '/encode') {
+    if (req.method === 'POST' && pathname === '/encode') {
       await apply((p) => codec.encode(p), req, res);
       return;
     }
-    if (req.method === 'POST' && req.url === '/decode') {
+    if (req.method === 'POST' && pathname === '/decode') {
       await apply((p) => codec.decode(p), req, res);
       return;
     }
+    setCorsHeaders(req, res);
     res.statusCode = 404;
     res.end('Not found');
   } catch (err) {
     console.error('Codec server error', err);
+    setCorsHeaders(req, res);
     res.statusCode = 500;
     res.end((err as Error).message);
   }
