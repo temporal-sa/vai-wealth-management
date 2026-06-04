@@ -7,8 +7,8 @@ const Payloads = temporal.api.common.v1.Payloads;
 
 const HOST = process.env.CODEC_SERVER_HOST ?? '127.0.0.1';
 const PORT = Number(process.env.CODEC_SERVER_PORT ?? 8081);
-const TEMPORAL_UI_ORIGIN = process.env.TEMPORAL_UI_ORIGIN ?? 'http://localhost:8233';
 
+const TEMPORAL_UI_ORIGIN = 'http://localhost:8233';
 const ALLOWED_ORIGINS = new Set([TEMPORAL_UI_ORIGIN, 'https://cloud.temporal.io']);
 
 const codec = new ClaimCheckCodec(createRedisClient());
