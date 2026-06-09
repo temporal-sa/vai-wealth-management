@@ -288,7 +288,15 @@ const HANDOFF_STOP_CONDITIONS = Object.keys(HANDOFF_TOOL_TO_AGENT).map(hasToolCa
 // ---------------------------------------------------------------------------
 // Agent runner (same pattern as vai_supervisor)
 // ---------------------------------------------------------------------------
-
+// Note that the agentic loop runs in an activity, which isen't ideal for
+// observing what is happening at the LLM and/or tool calls.
+// It takes advantage of Vercel's generateText() which calls the specified
+// LLM, and determines what tools to call and loops until complete (stopWhen)
+// To see what happens at an LLM and tool level, using this approach requires
+// a third party integration with LangFuse
+//
+// This approach is taken to maintain consistency with the solution found
+// in src/vai_supervisor/main.ts.
 async function runAgentLoop(
   startAgent: AgentName,
   messages: ModelMessage[],
