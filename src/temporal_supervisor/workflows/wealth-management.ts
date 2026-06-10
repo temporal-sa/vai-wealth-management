@@ -1,34 +1,24 @@
 import {
   defineSignal,
-  defineUpdate,
   setHandler,
   condition,
   proxyActivities,
-  startChild,
   workflowInfo,
   log,
 } from '@temporalio/workflow';
 import type {
   ProcessUserMessageInput,
   UpdateStatusInput,
-  ChatInteraction,
   StatusUpdate,
-  StartChildWorkflowInput,
 } from '../shared';
 import {
   PROCESS_USER_MESSAGE_SIGNAL,
   END_WORKFLOW_SIGNAL,
   UPDATE_STATUS_SIGNAL,
-  START_CHILD_WORKFLOW_UPDATE,
-  TASK_QUEUE_NAME,
 } from '../shared';
-import type * as agentActivities from '../activities/agent';
 import type * as eventStreamActivities from '../activities/event-stream';
 import type { ModelMessage } from 'ai';
-
-const { runAgentTurn } = proxyActivities<typeof agentActivities>({
-  startToCloseTimeout: '5m',
-});
+import { runAgentTurn, AgentName } from './agent-loop';
 
 const { appendChatInteraction, appendStatusUpdate, deleteConversation } =
   proxyActivities<typeof eventStreamActivities>({
@@ -42,10 +32,9 @@ const { appendChatInteraction, appendStatusUpdate, deleteConversation } =
 const processUserMessageSignal = defineSignal<[ProcessUserMessageInput]>(PROCESS_USER_MESSAGE_SIGNAL);
 const endWorkflowSignal = defineSignal(END_WORKFLOW_SIGNAL);
 const updateStatusSignal = defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL);
-const startChildWorkflowUpdate = defineUpdate<void, [StartChildWorkflowInput]>(START_CHILD_WORKFLOW_UPDATE);
 
 // ---------------------------------------------------------------------------
-// Workflow — type name matches Python's WealthManagementWorkflow exactly
+// Workflow — agent loop now runs in workflow context via @temporalio/ai-sdk
 // ---------------------------------------------------------------------------
 
 export async function WealthManagementWorkflow(): Promise<void> {
@@ -57,7 +46,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
   let messages: ModelMessage[] = [];
   let clientId: string | undefined;
   let childWorkflowId: string | undefined;
-  let activeAgent: string | undefined;
+  let activeAgent: AgentName | undefined;
 
   setHandler(processUserMessageSignal, (input: ProcessUserMessageInput) => {
     log.info('Signal received: process_user_message', { userInput: input.user_input });
@@ -72,15 +61,6 @@ export async function WealthManagementWorkflow(): Promise<void> {
   setHandler(updateStatusSignal, (input: UpdateStatusInput) => {
     log.info('Signal received: update_status', { status: input.status });
     pendingStatuses.push(input);
-  });
-
-  setHandler(startChildWorkflowUpdate, async ({ workflowId: childId, workflowInput }) => {
-    await startChild('OpenInvestmentAccountWorkflow', {
-      workflowId: childId,
-      taskQueue: TASK_QUEUE_NAME,
-      args: [workflowInput],
-    });
-    log.info('Child workflow started', { childWorkflowId: childId });
   });
 
   log.info('WealthManagementWorkflow started', { workflowId });
@@ -105,10 +85,10 @@ export async function WealthManagementWorkflow(): Promise<void> {
         messages,
         clientId,
         childWorkflowId,
-        activeAgent: activeAgent as any,
+        activeAgent,
       });
 
-      messages = result.messages as ModelMessage[];
+      messages = result.messages;
       clientId = result.clientId;
       childWorkflowId = result.childWorkflowId;
       activeAgent = result.activeAgent;

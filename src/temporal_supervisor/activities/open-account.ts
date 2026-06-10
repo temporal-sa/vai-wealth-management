@@ -29,10 +29,10 @@ export async function updateClientDetails(
 }
 
 /**
- * Signals the child workflow that KYC is approved.
+ * Queries the OpenInvestmentAccountWorkflow child workflow for its current state.
  */
-export async function approveKyc(childWorkflowId: string): Promise<void> {
+export async function getAccountStatus(childWorkflowId: string): Promise<string> {
   const client = await getTemporalClient();
   const handle = client.workflow.getHandle(childWorkflowId);
-  await handle.signal('verify_kyc');
+  return handle.query<string>('get_current_state');
 }

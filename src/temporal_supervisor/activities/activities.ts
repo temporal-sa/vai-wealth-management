@@ -2,4 +2,4 @@ export * from './event-stream';
 export * from './beneficiaries';
 export * from './investments';
 export * from './clients';
-export * from './agent';
+export * from './open-account';

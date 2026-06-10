@@ -1,5 +1,7 @@
 import { NativeConnection, Worker, Runtime, DefaultLogger } from '@temporalio/worker';
 import type { LogEntry } from '@temporalio/worker';
+import { AiSdkPlugin } from '@temporalio/ai-sdk';
+import { google } from '@ai-sdk/google';
 import * as activities from './activities/activities';
 import { ClientHelper } from '../common/client-helper';
 import { buildDataConverter } from '../common/data-converter';
@@ -43,6 +45,14 @@ async function run() {
       workflowsPath: require.resolve('./workflows/index'),
       activities,
       dataConverter: buildDataConverter(),
+      plugins: [new AiSdkPlugin({ modelProvider: google })],
+      // @temporalio/ai-sdk's barrel re-exports activity-side code alongside
+      // the workflow-safe temporalProvider; the bundler stubs them. Crypto is
+      // pulled in transitively by the same path. None are reachable from
+      // workflow code paths at runtime.
+      bundlerOptions: {
+        ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'],
+      },
     });
 
     await worker.run();

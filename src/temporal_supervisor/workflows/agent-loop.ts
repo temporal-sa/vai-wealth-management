@@ -1,9 +1,16 @@
+// @temporalio/ai-sdk must load first — its side-effect import installs
+// `TransformStream`, `Headers`, and `structuredClone` polyfills that
+// `ai`'s transitive `eventsource-parser` references at evaluation time.
+import { temporalProvider } from '@temporalio/ai-sdk';
+import {
+  proxyActivities,
+  getExternalWorkflowHandle,
+  startChild,
+  uuid4,
+  log,
+} from '@temporalio/workflow';
 import { generateText, tool, hasToolCall, ModelMessage, AssistantModelMessage, ToolModelMessage, ToolSet } from 'ai';
-import { google } from '@ai-sdk/google';
 import { z } from 'zod';
-import { Client } from '@temporalio/client';
-import { log } from '@temporalio/activity';
-import { nanoid } from 'nanoid';
 
 import {
   BENE_AGENT_NAME, BENE_HANDOFF, BENE_INSTRUCTIONS,
@@ -12,19 +19,24 @@ import {
   OPEN_ACCOUNT_AGENT_NAME, OPEN_ACCOUNT_HANDOFF, OPEN_ACCOUNT_INSTRUCTIONS,
 } from '../../common/agent-constants';
 import { ClientContext } from '../../common/account-context';
-import { ClientHelper } from '../../common/client-helper';
-import { BeneficiariesManager } from '../../common/beneficiaries-manager';
-import { InvestmentManager } from '../../common/investment-manager';
-import { ClientsManager } from '../../common/clients-manager';
-import { ChatInteraction, START_CHILD_WORKFLOW_UPDATE, StartChildWorkflowInput } from '../shared';
+import { ChatInteraction, OpenInvestmentAccountInput, TASK_QUEUE_NAME } from '../shared';
+import type * as beneficiaryActivities from '../activities/beneficiaries';
+import type * as investmentActivities from '../activities/investments';
+import type * as openAccountActivities from '../activities/open-account';
 
 // ---------------------------------------------------------------------------
-// Managers
+// Proxied activities (filesystem / cross-workflow query+update I/O)
 // ---------------------------------------------------------------------------
 
-const beneficiariesMgr = new BeneficiariesManager();
-const investmentMgr = new InvestmentManager();
-const clientsMgr = new ClientsManager();
+const beneficiariesActs = proxyActivities<typeof beneficiaryActivities>({
+  startToCloseTimeout: '30s',
+});
+const investmentActs = proxyActivities<typeof investmentActivities>({
+  startToCloseTimeout: '30s',
+});
+const openAccountActs = proxyActivities<typeof openAccountActivities>({
+  startToCloseTimeout: '30s',
+});
 
 // ---------------------------------------------------------------------------
 // Types
@@ -46,16 +58,8 @@ interface AgentRunContext {
 }
 
 // ---------------------------------------------------------------------------
-// Temporal client (used by open_account tools)
-// ---------------------------------------------------------------------------
-
-async function getTemporalClient(): Promise<Client> {
-  const { client } = await new ClientHelper().connectClient();
-  return client;
-}
-
-// ---------------------------------------------------------------------------
-// Build tools — passed ctx by reference so tools mutate shared state
+// Tool builders — tool execute runs in workflow context; non-deterministic
+// work must go through activities or workflow primitives.
 // ---------------------------------------------------------------------------
 
 function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
@@ -66,7 +70,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`list_beneficiaries(${client_id})`);
-        return beneficiariesMgr.listBeneficiaries(client_id);
+        return beneficiariesActs.listBeneficiaries(client_id);
       },
     }),
     add_beneficiary: tool({
@@ -78,7 +82,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, first_name, last_name, relationship }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`add_beneficiary(${client_id}, ${first_name} ${last_name})`);
-        return beneficiariesMgr.addBeneficiary(client_id, first_name, last_name, relationship);
+        return beneficiariesActs.addBeneficiary(client_id, first_name, last_name, relationship);
       },
     }),
     delete_beneficiary: tool({
@@ -87,7 +91,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, beneficiary_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`delete_beneficiary(${client_id}, ${beneficiary_id})`);
-        return beneficiariesMgr.deleteBeneficiary(client_id, beneficiary_id);
+        return beneficiariesActs.deleteBeneficiary(client_id, beneficiary_id);
       },
     }),
   };
@@ -101,7 +105,7 @@ function buildInvestmentTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`list_investments(${client_id})`);
-        return investmentMgr.listInvestmentAccounts(client_id);
+        return investmentActs.listInvestments(client_id);
       },
     }),
     close_investment: tool({
@@ -110,7 +114,7 @@ function buildInvestmentTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, investment_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`close_investment(${client_id}, ${investment_id})`);
-        return investmentMgr.deleteInvestmentAccount(client_id, investment_id);
+        return investmentActs.closeInvestment(client_id, investment_id);
       },
     }),
   };
@@ -127,16 +131,20 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       }),
       execute: async ({ client_id, account_name, initial_amount }) => {
         ctx.clientContext.clientId = client_id;
-        const childId = `open-account-${nanoid()}`;
+        const childId = `open-account-${uuid4()}`;
         ctx.childWorkflowId = childId;
         ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childId}`);
-        const temporalClient = await getTemporalClient();
-        const parentHandle = temporalClient.workflow.getHandle(ctx.parentWorkflowId);
-        const updateInput: StartChildWorkflowInput = {
-          workflowId: childId,
-          workflowInput: { client_id, account_name, initial_amount, parent_workflow_id: ctx.parentWorkflowId },
+        const workflowInput: OpenInvestmentAccountInput = {
+          client_id,
+          account_name,
+          initial_amount,
+          parent_workflow_id: ctx.parentWorkflowId,
         };
-        await parentHandle.executeUpdate(START_CHILD_WORKFLOW_UPDATE, { args: [updateInput] });
+        await startChild('OpenInvestmentAccountWorkflow', {
+          workflowId: childId,
+          taskQueue: TASK_QUEUE_NAME,
+          args: [workflowInput],
+        });
         return { child_workflow_id: childId, message: 'Account opening process started.' };
       },
     }),
@@ -145,9 +153,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`get_current_client_info(${child_workflow_id})`);
-        const temporalClient = await getTemporalClient();
-        const handle = temporalClient.workflow.getHandle(child_workflow_id);
-        return handle.query<unknown>('get_client_details');
+        return openAccountActs.getCurrentClientInfo(child_workflow_id);
       },
     }),
     update_client_details: tool({
@@ -158,9 +164,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       }),
       execute: async ({ child_workflow_id, fields }) => {
         ctx.traceLines.push(`update_client_details(${child_workflow_id})`);
-        const temporalClient = await getTemporalClient();
-        const handle = temporalClient.workflow.getHandle(child_workflow_id);
-        await handle.executeUpdate('update_client_details', { args: [fields] });
+        await openAccountActs.updateClientDetails(child_workflow_id, fields);
         return { message: 'Client details updated.' };
       },
     }),
@@ -169,9 +173,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`approve_kyc(${child_workflow_id})`);
-        const temporalClient = await getTemporalClient();
-        const handle = temporalClient.workflow.getHandle(child_workflow_id);
-        await handle.signal('verify_kyc');
+        await getExternalWorkflowHandle(child_workflow_id).signal('verify_kyc');
         return { message: 'KYC approved. Waiting for compliance review.' };
       },
     }),
@@ -180,9 +182,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`get_account_status(${child_workflow_id})`);
-        const temporalClient = await getTemporalClient();
-        const handle = temporalClient.workflow.getHandle(child_workflow_id);
-        return handle.query<string>('get_current_state');
+        return openAccountActs.getAccountStatus(child_workflow_id);
       },
     }),
   };
@@ -286,17 +286,11 @@ const HANDOFF_TOOL_TO_AGENT: Record<string, AgentName> = {
 const HANDOFF_STOP_CONDITIONS = Object.keys(HANDOFF_TOOL_TO_AGENT).map(hasToolCall);
 
 // ---------------------------------------------------------------------------
-// Agent runner (same pattern as vai_supervisor)
+// Agent loop — runs in workflow context. The AiSdkPlugin transparently wraps
+// each generateText call as a Temporal activity, giving per-LLM-call
+// visibility in workflow event history.
 // ---------------------------------------------------------------------------
-// Note that the agentic loop runs in an activity, which isen't ideal for
-// observing what is happening at the LLM and/or tool calls.
-// It takes advantage of Vercel's generateText() which calls the specified
-// LLM, and determines what tools to call and loops until complete (stopWhen)
-// To see what happens at an LLM and tool level, using this approach requires
-// a third party integration with LangFuse
-//
-// This approach is taken to maintain consistency with the solution found
-// in src/vai_supervisor/main.ts.
+
 async function runAgentLoop(
   startAgent: AgentName,
   messages: ModelMessage[],
@@ -306,12 +300,13 @@ async function runAgentLoop(
   let currentMessages = messages;
   const agentDefs = buildAgentDefs(ctx);
 
+  // eslint-disable-next-line no-constant-condition
   while (true) {
     const def = agentDefs[currentAgent];
     log.info(`[${def.name}] generating response`);
 
     const result = await generateText({
-      model: google('gemini-2.5-pro'),
+      model: temporalProvider.languageModel('gemini-2.5-pro'),
       system: def.instructions(ctx),
       messages: currentMessages,
       tools: def.tools as any,
@@ -325,7 +320,6 @@ async function runAgentLoop(
     ctx.traceLines.push(traceLine);
     log.info(traceLine);
 
-    // Extract client ID from supervisor handoff tool calls
     for (const tc of result.toolCalls) {
       if (tc.toolName in HANDOFF_TOOL_TO_AGENT) {
         const input = tc.input as any;
@@ -349,7 +343,7 @@ async function runAgentLoop(
 }
 
 // ---------------------------------------------------------------------------
-// Public activity — called by WealthManagementWorkflow
+// Public entry — called by WealthManagementWorkflow per user message
 // ---------------------------------------------------------------------------
 
 export interface RunAgentTurnInput {

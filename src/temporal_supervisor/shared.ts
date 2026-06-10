@@ -31,13 +31,6 @@ export interface OpenInvestmentAccountInput {
   parent_workflow_id: string;
 }
 
-export const START_CHILD_WORKFLOW_UPDATE = 'start_child_workflow';
-
-export interface StartChildWorkflowInput {
-  workflowId: string;
-  workflowInput: OpenInvestmentAccountInput;
-}
-
 export interface WealthManagementClient {
   client_id: string;
   first_name: string;

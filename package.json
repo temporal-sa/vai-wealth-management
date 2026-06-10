@@ -31,6 +31,7 @@
   "dependencies": {
     "@ai-sdk/google": "^3.0.63",
     "@temporalio/activity": "^1.16.0",
+    "@temporalio/ai-sdk": "^1.18.0",
     "@temporalio/client": "^1.16.0",
     "@temporalio/envconfig": "^1.16.0",
     "@temporalio/worker": "^1.16.0",
