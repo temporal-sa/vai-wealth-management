@@ -31,6 +31,12 @@ const { openInvestment, closeInvestment } = proxyActivities<typeof investmentAct
 const { debitLinkedAccount, creditLinkedAccount } = proxyActivities<typeof fundingActivities>(activityOptions);
 const { registerAccount } = proxyActivities<typeof custodianActivities>(activityOptions);
 
+
+interface Promotion {
+  rate: number;
+  maxBonus: number;
+}
+
 // ---------------------------------------------------------------------------
 // Welcome-bonus promotion: a percentage of the initial deposit, up to a maximum.
 // *** Bug-In-Workflow-Code ***
@@ -39,11 +45,6 @@ const { registerAccount } = proxyActivities<typeof custodianActivities>(activity
 // undefined and reading its rate throws a TypeError.
 // To fix it, uncomment the first line below and comment out the second. See README "Failure scenarios".
 // ---------------------------------------------------------------------------
-
-interface Promotion {
-  rate: number;
-  maxBonus: number;
-}
 
 // const PROMOTIONS: Record<string, Promotion> = { 'WELCOME-BONUS': { rate: 0.01, maxBonus: 500 } };
 const PROMOTIONS: Record<string, Promotion> = { WELCOME_BONUS: { rate: 0.01, maxBonus: 500 } };
