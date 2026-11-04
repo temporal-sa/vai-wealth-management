@@ -12,8 +12,10 @@ import { temporal } from '@temporalio/proto';
 import { FundingManager, InsufficientFundsError } from '../../common/funding-manager';
 import { translateModelError } from '../chaos-model';
 import { validateNewAccount } from '../activities/investments';
+import { InvestmentManager } from '../../common/investment-manager';
+import { openAccountWorkflowId } from '../workflows/start-open-account';
 import type { OpenInvestmentAccountInput, OpenInvestmentAccountOutput, WealthManagementClient } from '../shared';
-import { OpenInvestmentAccountWorkflow, TestParentWorkflow } from './test-workflows';
+import { OpenInvestmentAccountWorkflow, StartOpenAccountTwiceWorkflow, TestParentWorkflow } from './test-workflows';
 
 const TASK_QUEUE = 'failure-scenarios-test';
 const CLIENT_ID = '123';
@@ -204,12 +206,51 @@ describe('failure scenarios', function () {
       await child.terminate('test finished');
     });
   });
+
+  it('starts one Open Account workflow per account, however often the tool is called', async () => {
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: TASK_QUEUE,
+      workflowsPath: require.resolve('./test-workflows'),
+      activities: fakeActivities([]),
+    });
+    await worker.runUntil(async () => {
+      const accountName = `Car ${Math.random().toString(36).slice(2)}`;
+      const childWorkflowId = openAccountWorkflowId(CLIENT_ID, accountName);
+      const start = (suffix: string, times: number) =>
+        env.client.workflow.execute(StartOpenAccountTwiceWorkflow, {
+          taskQueue: TASK_QUEUE,
+          workflowId: `start-twice-${suffix}`,
+          args: [
+            { client_id: CLIENT_ID, account_name: accountName, initial_amount: 1000, parent_workflow_id: `start-twice-${suffix}`, promo_code: null },
+            times,
+          ],
+        });
+
+      assert.deepStrictEqual(await start(`${childWorkflowId}-1`, 2), [
+        { childWorkflowId, alreadyRunning: false },
+        { childWorkflowId, alreadyRunning: true },
+      ]);
+
+      // The child is terminated with its parent; after that the same account can be opened again
+      const child = env.client.workflow.getHandle(childWorkflowId);
+      while ((await child.describe()).status.name === 'RUNNING') {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      assert.deepStrictEqual(await start(`${childWorkflowId}-2`, 1), [{ childWorkflowId, alreadyRunning: false }]);
+    });
+  });
+
+  it('derives the workflow ID from the client and account name', () => {
+    assert.strictEqual(openAccountWorkflowId('123', '  Kids College Fund! '), 'open-account-123-kids-college-fund');
+    assert.strictEqual(openAccountWorkflowId('123', 'car'), openAccountWorkflowId('123', 'Car'));
+  });
 });
 
 describe('business rules', () => {
-  async function failureOf(amount: number): Promise<ApplicationFailure> {
+  async function failureOf(amount: number, accountName = 'College Fund'): Promise<ApplicationFailure> {
     try {
-      await validateNewAccount(CLIENT_ID, 'College Fund', amount);
+      await validateNewAccount(CLIENT_ID, accountName, amount);
     } catch (err) {
       assert.ok(err instanceof ApplicationFailure);
       return err;
@@ -231,6 +272,14 @@ describe('business rules', () => {
 
   it('accepts deposits within the limits', async () => {
     await validateNewAccount(CLIENT_ID, 'College Fund', 1000);
+  });
+
+  it('rejects a name the client already has, ignoring case and spaces', async () => {
+    const [existing] = new InvestmentManager().listInvestmentAccounts(CLIENT_ID);
+    assert.ok(existing, `client ${CLIENT_ID} needs at least one account in data/investments.json`);
+    const failure = await failureOf(1000, `  ${existing.name.toUpperCase()} `);
+    assert.strictEqual(failure.type, 'DuplicateAccountName');
+    assert.strictEqual(failure.nonRetryable, true);
   });
 });
 

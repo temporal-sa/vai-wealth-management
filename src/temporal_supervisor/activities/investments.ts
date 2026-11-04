@@ -40,6 +40,10 @@ export async function closeInvestment(
 
 /** Business rules for a new account. Breaking one is non-retryable: the same request would fail again. */
 export async function validateNewAccount(clientId: string, accountName: string, initialAmount: number): Promise<void> {
+  const normalized = accountName.trim().toLowerCase();
+  if (mgr.listInvestmentAccounts(clientId).some((a) => a.name.trim().toLowerCase() === normalized)) {
+    throw ApplicationFailure.nonRetryable(`An account named "${accountName}" already exists`, 'DuplicateAccountName');
+  }
   if (initialAmount > MAX_INITIAL_DEPOSIT) {
     throw ApplicationFailure.nonRetryable(
       `Initial deposits over ${formatUsd(MAX_INITIAL_DEPOSIT)} cannot be opened online and must be arranged with a wealth advisor`,

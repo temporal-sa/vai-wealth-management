@@ -5,8 +5,6 @@ import { TemporalProvider } from '@temporalio/ai-sdk';
 import {
   proxyActivities,
   getExternalWorkflowHandle,
-  startChild,
-  uuid4,
   workflowInfo,
   log,
   ActivityFailure,
@@ -27,6 +25,7 @@ import { LLM_RETRY_POLICY, TOOL_RETRY_POLICY } from '../retry-policies';
 import type * as beneficiaryActivities from '../activities/beneficiaries';
 import type * as investmentActivities from '../activities/investments';
 import type * as openAccountActivities from '../activities/open-account';
+import { startOpenAccount } from './start-open-account';
 
 // ---------------------------------------------------------------------------
 // Proxied activities (filesystem / cross-workflow query+update I/O)
@@ -139,7 +138,9 @@ function buildInvestmentTools(ctx: AgentRunContext): ToolSet {
 function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
   return {
     open_new_investment_account: tool({
-      description: 'Begin opening a new investment account. Returns the child workflow ID to track progress.',
+      description:
+        'Begin opening a new investment account. Returns the child workflow ID to track progress. ' +
+        'If this account is already being opened, returns that one instead of starting another.',
       inputSchema: z.object({
         client_id: z.string(),
         account_name: z.string().describe('Name of the new investment account'),
@@ -156,9 +157,6 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           return { message: `The account cannot be opened: ${reason}` };
         }
         const promo_code = await investmentActs.findPromotion(client_id);
-        const childId = `open-account-${uuid4()}`;
-        ctx.childWorkflowId = childId;
-        ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childId}`);
         const workflowInput: OpenInvestmentAccountInput = {
           client_id,
           account_name,
@@ -166,14 +164,20 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           parent_workflow_id: ctx.parentWorkflowId,
           promo_code,
         };
-        // Without a task queue the child runs on this worker's; with one it can run in Java
         const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
-        await startChild('OpenInvestmentAccountWorkflow', {
-          workflowId: childId,
-          taskQueue,
-          args: [workflowInput],
-        });
-        return { child_workflow_id: childId, message: 'Account opening process started.' };
+        const { childWorkflowId, alreadyRunning } = await startOpenAccount(workflowInput, taskQueue);
+        ctx.childWorkflowId = childWorkflowId;
+        ctx.traceLines.push(
+          `open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childWorkflowId}` +
+            (alreadyRunning ? ' (already in progress)' : ''),
+        );
+        if (alreadyRunning) {
+          return {
+            child_workflow_id: childWorkflowId,
+            message: `Account "${account_name}" is already being opened. Continue with that process; no new one was started.`,
+          };
+        }
+        return { child_workflow_id: childWorkflowId, message: 'Account opening process started.' };
       },
     }),
     get_current_client_info: tool({
