@@ -156,6 +156,21 @@ cd src/temporal_supervisor
 ./startlocalworker.sh
 ```
 
+### Run the Open Account workflow in Java (optional)
+
+To run the Open Account child workflow in Java instead, pass a task queue name to the worker
+and start the [Java worker](../../java/README.md) with the same name. This works the same way
+with `startcloudworker.sh`.
+
+```shell
+cd src/temporal_supervisor
+./startlocalworker.sh OpenAccount
+
+# in another terminal
+cd java
+./startlocalworker.sh OpenAccount
+```
+
 ### Start the API
 
 ```shell

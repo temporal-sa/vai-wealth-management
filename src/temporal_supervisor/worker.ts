@@ -33,9 +33,19 @@ function logClaimCheckStatus(): void {
   }
 }
 
+function logOpenAccountTaskQueue(taskQueue: string): void {
+  const openAccountQueue = process.env.TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT;
+  if (openAccountQueue) {
+    console.error(`Open Account workflow runs on task queue ${openAccountQueue}; remember to start the Java worker`);
+  } else {
+    console.error(`Open Account workflow runs on this worker (task queue ${taskQueue})`);
+  }
+}
+
 async function run() {
   logClaimCheckStatus();
   const helper = new ClientHelper();
+  logOpenAccountTaskQueue(helper.taskQueue);
   const connection = await NativeConnection.connect(helper.nativeConnectionOptions);
   try {
     const worker = await Worker.create({

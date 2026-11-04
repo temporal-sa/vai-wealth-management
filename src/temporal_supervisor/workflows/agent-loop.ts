@@ -19,7 +19,7 @@ import {
   OPEN_ACCOUNT_AGENT_NAME, OPEN_ACCOUNT_HANDOFF, OPEN_ACCOUNT_INSTRUCTIONS,
 } from '../../common/agent-constants';
 import { ClientContext } from '../../common/account-context';
-import { ChatInteraction, OpenInvestmentAccountInput, TASK_QUEUE_NAME } from '../shared';
+import { ChatInteraction, OpenInvestmentAccountInput } from '../shared';
 import type * as beneficiaryActivities from '../activities/beneficiaries';
 import type * as investmentActivities from '../activities/investments';
 import type * as openAccountActivities from '../activities/open-account';
@@ -140,9 +140,11 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           initial_amount,
           parent_workflow_id: ctx.parentWorkflowId,
         };
+        // Without a task queue the child runs on this worker's; with one it can run in Java
+        const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
         await startChild('OpenInvestmentAccountWorkflow', {
           workflowId: childId,
-          taskQueue: TASK_QUEUE_NAME,
+          taskQueue,
           args: [workflowInput],
         });
         return { child_workflow_id: childId, message: 'Account opening process started.' };
