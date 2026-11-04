@@ -51,6 +51,7 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
 
     private OpenInvestmentAccountInput input;
     private String state = "Initializing";
+    private boolean initialized = false;
     private boolean kycApproved = false;
     private boolean complianceApproved = false;
     private WealthManagementClient clientDetails;
@@ -63,18 +64,16 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         // Step 1: Load client details
         log.info("OpenInvestmentAccountWorkflow started: {}", input);
         clientDetails = activities.execute("getClient", WealthManagementClient.class, input.clientId());
-        state = "Waiting KYC";
-        log.info("State: Waiting KYC for {}", accountName);
-        signalParent(String.format("Account \"%s\" is waiting for KYC verification.", accountName));
+        initialized = true;
+        setState("Waiting KYC");
 
         // Step 2: Wait for KYC approval
         Workflow.await(() -> kycApproved);
-        state = "Waiting Compliance Review";
-        log.info("State: Waiting Compliance Review for {}", accountName);
-        signalParent(String.format("KYC approved. Account \"%s\" is waiting for compliance review.", accountName));
+        setState("Waiting Compliance Review");
 
         // Step 3: Wait for compliance approval
         Workflow.await(() -> complianceApproved);
+        setState("Compliance review has been approved. Creating Investment Account");
 
         // Step 4: Create, fund and register the investment account
         return openAccount();
@@ -92,39 +91,39 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         String accountName = input.accountName();
         double amount = input.initialAmount();
         double bonus = input.promoCode() != null ? welcomeBonus(input.promoCode(), amount) : 0.0;
-        // Idempotency key: stable across activity retries and worker restarts
-        String transferId = Workflow.getInfo().getWorkflowId() + "-initial-deposit";
+        // Idempotency key: stable across activity retries and worker restarts. It includes the run ID
+        // because the workflow ID is reused when the customer opens an account with the same name again
+        // in the same chat (e.g. after a rollback), and a reused key would return the earlier transfer
+        // without moving any money.
+        String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId()
+                + "-initial-deposit";
 
         Saga saga = new Saga(new Saga.Options.Builder().setParallelCompensation(false).build());
         try {
-            setStepState("Creating the account record.");
+            setState("Creating the account record.");
             InvestmentAccount account = activities.execute("openInvestment", InvestmentAccount.class,
                     clientId, accountName, amount + bonus);
             saga.addCompensation(() -> compensate("removing the account record",
                     "closeInvestment", clientId, account.investmentId()));
 
-            setStepState(String.format("Transferring %s from the linked bank account.", formatUsd(amount)));
+            setState(String.format("Transferring %s from the linked bank account.", formatUsd(amount)));
             activities.execute("debitLinkedAccount", Map.class, clientId, amount, transferId);
             saga.addCompensation(() -> compensate(
                     String.format("refunding %s to the linked bank account", formatUsd(amount)),
                     "creditLinkedAccount", clientId, amount, transferId + "-refund"));
 
-            setStepState("Registering the account with the custodian.");
+            setState("Registering the account with the custodian.");
             activities.execute("registerAccount", String.class, clientId, account.investmentId(), amount);
         } catch (ActivityFailure e) {
             String reason = reason(e);
-            setStepState("Failed: " + reason + ". Rolling back.");
+            setState("Failed: " + reason + ". Rolling back.");
             saga.compensate();
-            state = "Rolled back. The account was not opened: " + reason + ".";
-            log.info("State: {} for {}", state, accountName);
-            signalParent(String.format("Account \"%s\" was not opened: %s. All changes were rolled back.",
-                    accountName, reason));
+            setState("Rolled back. The account was not opened: " + reason + ".");
             return new OpenInvestmentAccountOutput(false, "The account was not opened: " + reason);
         }
 
-        state = "Complete";
         log.info("Investment account {} opened successfully", accountName);
-        signalParent(String.format("Account \"%s\" has been successfully opened.", accountName));
+        setState("Complete");
         return new OpenInvestmentAccountOutput(true, "investment account created");
     }
 
@@ -134,7 +133,7 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
     }
 
     private void compensate(String description, String activityName, Object... args) {
-        setStepState("Rolling back: " + description + ".");
+        setState("Rolling back: " + description + ".");
         // Compensations are activities too, so they are retried until they succeed
         activities.execute(activityName, Object.class, args);
     }
@@ -160,15 +159,20 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
 
     @Override
     public WealthManagementClient getClientDetails() {
+        Workflow.await(() -> initialized);
         return clientDetails;
     }
 
-    // Allows the agent to update client details during KYC
+    // The customer corrected their details during KYC: save them, which also approves KYC
     @Override
-    public void updateClientDetails(Map<String, Object> fields) {
-        if (clientDetails != null) {
-            clientDetails = clientDetails.withUpdates(fields);
+    public WealthManagementClient updateClientDetails(Map<String, Object> fields) {
+        WealthManagementClient result = activities.execute("updateClient", WealthManagementClient.class,
+                input.clientId(), fields);
+        if (result != null) {
+            clientDetails = result;
         }
+        kycApproved = true;
+        return result;
     }
 
     @Override
@@ -181,17 +185,14 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         complianceApproved = true;
     }
 
-    // A saga step: visible to get_account_status and in the UI's status area
-    private void setStepState(String step) {
-        state = step;
-        log.info("State: {} for {}", step, input.accountName());
-        signalParent(String.format("Opening account \"%s\": %s", input.accountName(), step));
-    }
-
-    // Signals are routed by workflow ID, not task queue, so this reaches the TypeScript supervisor
-    // even though it runs on a different task queue.
-    private void signalParent(String status) {
+    // Every state change is visible to get_account_status and reported to the parent, which shows it
+    // in the UI's status area. Signals are routed by workflow ID, not task queue, so this reaches the
+    // TypeScript supervisor even though it runs on a different task queue.
+    private void setState(String newState) {
+        state = newState;
+        log.info("State: {} for {}", newState, input.accountName());
         Workflow.newUntypedExternalWorkflowStub(input.parentWorkflowId())
-                .signal("update_status", new UpdateStatusInput(status));
+                .signal("update_status", UpdateStatusInput.accountState(
+                        input.accountName(), newState, Workflow.getInfo().getWorkflowId()));
     }
 }

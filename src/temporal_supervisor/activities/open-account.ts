@@ -1,38 +1,37 @@
-import { Connection, Client } from '@temporalio/client';
+import { ClientHelper, getSharedClient } from '../../common/client-helper';
 import { WealthManagementClient } from '../shared';
 
-function getTemporalClient(): Promise<Client> {
-  return Connection.connect({ address: process.env.TEMPORAL_ADDRESS ?? 'localhost:7233' }).then(
-    (conn) => new Client({ connection: conn }),
-  );
-}
-
 /**
- * Queries the OpenInvestmentAccountWorkflow child workflow for the current client details.
+ * The current client details from the OpenInvestmentAccountWorkflow child workflow. It is an update,
+ * so it waits until the workflow has loaded them.
  */
 export async function getCurrentClientInfo(childWorkflowId: string): Promise<WealthManagementClient | null> {
-  const client = await getTemporalClient();
+  const client = await getSharedClient();
   const handle = client.workflow.getHandle(childWorkflowId);
-  return handle.query<WealthManagementClient | null>('get_client_details');
+  return handle.executeUpdate<WealthManagementClient | null, []>('get_client_details');
 }
 
 /**
- * Updates the client details in the child workflow via update.
+ * Saves corrected client details through the child workflow, which also approves KYC.
+ * Returns the saved client record.
  */
 export async function updateClientDetails(
   childWorkflowId: string,
   fields: Partial<WealthManagementClient>,
-): Promise<void> {
-  const client = await getTemporalClient();
+): Promise<WealthManagementClient | null> {
+  const client = await getSharedClient();
   const handle = client.workflow.getHandle(childWorkflowId);
-  await handle.executeUpdate('update_client_details', { args: [fields] });
+  return handle.executeUpdate<WealthManagementClient | null, [Partial<WealthManagementClient>]>(
+    'update_client_details',
+    { args: [fields] },
+  );
 }
 
 /**
  * Queries the OpenInvestmentAccountWorkflow child workflow for its current state.
  */
 export async function getAccountStatus(childWorkflowId: string): Promise<string> {
-  const client = await getTemporalClient();
+  const client = await getSharedClient();
   const handle = client.workflow.getHandle(childWorkflowId);
   return handle.query<string>('get_current_state');
 }
@@ -44,4 +43,12 @@ export async function getAccountStatus(childWorkflowId: string): Promise<string>
  */
 export async function getOpenAccountTaskQueue(): Promise<string | null> {
   return process.env.TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT || null;
+}
+
+/**
+ * The task queue for model (LLM) calls: TEMPORAL_TASK_QUEUE_LLM, or "<TEMPORAL_TASK_QUEUE>-llm".
+ * Workflow code can't read the environment, so it asks this activity.
+ */
+export async function getLlmTaskQueue(): Promise<string> {
+  return new ClientHelper().taskQueueLLM;
 }

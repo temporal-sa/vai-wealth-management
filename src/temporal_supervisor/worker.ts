@@ -6,7 +6,6 @@ import * as activities from './activities/activities';
 import { ClientHelper } from '../common/client-helper';
 import { buildDataConverter } from '../common/data-converter';
 import { chaosAwareProvider } from './chaos-model';
-import { llmTaskQueue } from './shared';
 
 // ---------------------------------------------------------------------------
 // Concise logger — strip SDK-internal metadata, one line per entry
@@ -76,7 +75,7 @@ async function run() {
 
     // Model calls run on their own task queue, so the server can rate limit them.
     // The plugin registers the model activities on every worker it is given.
-    const llmQueue = llmTaskQueue(helper.taskQueue);
+    const llmQueue = helper.taskQueueLLM;
     const maxCallsPerSecond = llmMaxCallsPerSecond();
     console.error(`Model calls run on task queue ${llmQueue}` +
       (maxCallsPerSecond ? `, limited to ${maxCallsPerSecond} per second` : ''));
