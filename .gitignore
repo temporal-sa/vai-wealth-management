@@ -10,3 +10,4 @@ __pycache__
 .idea
 .DS_Store
 tsconfig.tsbuildinfo
+.claude/settings.local.json
