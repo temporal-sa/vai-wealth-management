@@ -7,6 +7,8 @@ A supervisor agent routes customer requests to specialist sub-agents (beneficiar
 - A **non-Temporal CLI** that runs the same agent loop in a single process — useful for iterating on prompts and tools.
 - A **Temporal-integrated** flavor where the agent runs inside a Temporal Workflow as a durable, replayable, long-running conversation. A child workflow handles a multi-step "open new investment account" flow with KYC and compliance checkpoints. The child workflow can optionally run in [Java](java/README.md), showing a polyglot (TypeScript + Java) application.
 
+The Temporal flavor also has a **Chaos Panel** that injects failures at runtime (API and LLM outages, rate limits, a saga rollback, a bug in workflow code) to show how Temporal recovers. See [Failure scenarios](src/temporal_supervisor/README.md#failure-scenarios-chaos-panel).
+
 ![Architecture](images/architecture.png)
 
 ## Prerequisites

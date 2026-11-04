@@ -3,6 +3,7 @@ import cors from 'cors';
 import { WorkflowIdReusePolicy } from '@temporalio/common';
 import { ClientHelper } from '../common/client-helper';
 import { EventStreamManager } from '../temporal_supervisor/redis/event-stream-manager';
+import { ChaosManager, isChaosFlag } from '../common/chaos-manager';
 import {
   ProcessUserMessageInput,
   PROCESS_USER_MESSAGE_SIGNAL,
@@ -30,6 +31,7 @@ async function run(): Promise<void> {
   const { client } = await helper.connectClient();
   const taskQueue = helper.taskQueue;
   const events = new EventStreamManager();
+  const chaos = new ChaosManager();
 
   const app = express();
 
@@ -104,6 +106,42 @@ async function run(): Promise<void> {
       const message = (err as Error).message;
       console.error('Exception occurred starting workflow', message);
       res.json({ message: `An error occurred starting the workflow ${message}` });
+    }
+  });
+
+  // Chaos panel: failure-injection flags and the log of failures they caused.
+  // The worker reads the flags from Redis inside activities; the API never talks to Temporal about chaos.
+  app.get('/chaos', async (_req: Request, res: Response) => {
+    try {
+      res.json({ flags: await chaos.getFlags(), events: await chaos.getEvents() });
+    } catch (err) {
+      res.status(500).json({ detail: `Could not read chaos flags. ${(err as Error).message}` });
+    }
+  });
+
+  app.post('/chaos', async (req: Request, res: Response) => {
+    const flag = String(req.query.flag ?? '');
+    const enabled = String(req.query.enabled ?? '') === 'true';
+    if (!isChaosFlag(flag)) {
+      res.status(400).json({ detail: `Unknown chaos flag: ${flag}` });
+      return;
+    }
+    try {
+      await chaos.setEnabled(flag, enabled);
+      console.log(`Chaos flag ${flag} ${enabled ? 'on' : 'off'}`);
+      res.json({ flag, enabled });
+    } catch (err) {
+      res.status(500).json({ detail: `Could not set chaos flag. ${(err as Error).message}` });
+    }
+  });
+
+  app.post('/chaos/reset', async (_req: Request, res: Response) => {
+    try {
+      await chaos.reset();
+      console.log('Chaos flags reset');
+      res.json({ message: 'All chaos flags are off.' });
+    } catch (err) {
+      res.status(500).json({ detail: `Could not reset chaos flags. ${(err as Error).message}` });
     }
   });
 

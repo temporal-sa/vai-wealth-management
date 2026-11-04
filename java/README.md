@@ -9,8 +9,11 @@ How the two sides fit together:
 * When the TypeScript worker has `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` set, the supervisor starts
   `OpenInvestmentAccountWorkflow` as a child workflow on that task queue, which this worker polls.
   Without it, the child runs in TypeScript on the supervisor's task queue.
-* This workflow calls the TypeScript activities (`getClient`, `openInvestment`) by name on the TypeScript
-  task queue (`TEMPORAL_TASK_QUEUE`, default `VAISupervisor`).
+* This workflow calls the TypeScript activities (`getClient`, and the saga steps `openInvestment`,
+  `debitLinkedAccount`, `registerAccount` with their compensations `closeInvestment` and `creditLinkedAccount`)
+  by name on the TypeScript task queue (`TEMPORAL_TASK_QUEUE`, default `VAISupervisor`).
+  The chaos panel's flags are read inside those activities, so every failure scenario works with this worker too
+  (see [Failure scenarios](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel)).
 * It reports progress by signalling `update_status` on the parent workflow, as the TypeScript version does.
   Signals are routed by workflow ID, so the different task queue doesn't matter.
 * The workflow type, queries (`get_current_state`, `get_client_details`), update (`update_client_details`)
@@ -70,5 +73,6 @@ Keep API keys and certificates out of the repository.
 ```
 
 The workflow tests run against the Temporal test server, with fake TypeScript activities registered under the
-real activity names and a test parent workflow that records the status signals. They also check the JSON shapes
-the TypeScript supervisor sends and receives.
+real activity names and a test parent workflow that records the status signals. They cover the saga (happy path,
+rollback in reverse order, undoing only completed steps, transient retries), the promo-code bug pausing the
+workflow, and the JSON shapes the TypeScript supervisor sends and receives.

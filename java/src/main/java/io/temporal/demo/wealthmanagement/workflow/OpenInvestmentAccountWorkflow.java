@@ -1,6 +1,7 @@
 package io.temporal.demo.wealthmanagement.workflow;
 
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
+import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountOutput;
 import io.temporal.demo.wealthmanagement.model.WealthManagementClient;
 import io.temporal.workflow.QueryMethod;
 import io.temporal.workflow.SignalMethod;
@@ -18,7 +19,7 @@ import java.util.Map;
 @WorkflowInterface
 public interface OpenInvestmentAccountWorkflow {
     @WorkflowMethod(name = "OpenInvestmentAccountWorkflow")
-    void run(OpenInvestmentAccountInput input);
+    OpenInvestmentAccountOutput run(OpenInvestmentAccountInput input);
 
     @QueryMethod(name = "get_current_state")
     String getCurrentState();

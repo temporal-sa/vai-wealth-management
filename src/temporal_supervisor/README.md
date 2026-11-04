@@ -12,6 +12,10 @@ Scenarios currently implemented include
 * List Investments - shows a list of accounts and their current balances
 * Close Investment Account - closes an investment account
 
+The Temporal version also has a **Chaos Panel** that injects failures at runtime (API and LLM outages,
+rate limits, a saga rollback, a bug in workflow code) to show how Temporal handles them. See
+[Failure scenarios](#failure-scenarios-chaos-panel).
+
 ## Application Architecture
 
 The overall application architecture looks like this:
@@ -193,6 +197,54 @@ If you are opening a new investment account, in another terminal
 cd src/temporal_supervisor
 ./localsendcomplianceappoval.sh <Child Workflow ID>
 ```
+
+## Failure scenarios (chaos panel)
+
+Click **Chaos** in the chat header to open the chaos panel. Its switches inject
+failures at runtime: activities and the model read the flags from Redis on every
+attempt, so you can turn a failure on and off mid-conversation without restarting
+anything. The panel also lists each injected failure as it happens (activity and
+attempt number). Open the [Temporal UI](http://localhost:8233) alongside it to show
+the pending activity, its attempt count, and the last failure. **Reset all** turns
+every flag off and clears the failure log.
+
+| Scenario | How to show it | What Temporal does |
+|---|---|---|
+| Tool / API down | Turn on **Core banking API down**, ask to list your investments, wait, turn it off | The investment and beneficiary activities fail with a connection error and are retried (at most 5 seconds apart) until the switch is off. The agent waits mid-turn; nothing is lost or re-asked. |
+| LLM down | Turn on **Gemini API down** and send a message | The model call is an activity, so it is retried the same way and the conversation resumes where it was. |
+| LLM rate limited | Turn on **Gemini rate limited (429)** and send a message | The model activity fails with `nextRetryDelay: 15s`, which overrides the backoff like a Retry-After header: attempts are exactly 15 seconds apart. A real 429 from Gemini is handled the same way. |
+| Proactive rate limit | Restart the worker with `LLM_MAX_CALLS_PER_SECOND=0.2` and chat in several tabs | Model calls run on their own task queue (`VAISupervisor-llm`), which the Temporal server rate limits across all workers. Calls queue up instead of failing. |
+| Business rule | Ask to open an account with $2,000,000 (or under $100) | Validation fails once, non-retryably, and the agent explains why. No account opening is started. |
+| Saga rollback | Turn on **Custodian rejects new accounts** (and **Slow account-opening steps**), then open an account through compliance approval. Without flags: as client 123, open an account with $300,000 (the linked bank account has $250,000) | Opening an account creates the account record, debits the linked bank account, then registers with the custodian. A non-retryable failure undoes the completed steps in reverse: refund, then remove the account. Transfers are idempotent, so a retried debit or refund never moves money twice. With slow steps on, you can kill the worker mid-rollback and it picks up where it left off. |
+| Bug in workflow code | Turn on **Bug in workflow code** and open an account through compliance approval | New openings get a `WELCOME-BONUS` promo code, and the workflow's promo code path has a real bug. The workflow *task* fails with a `TypeError` (`NullPointerException` in Java), and the workflow stays Running with all its state while other chats keep working. |
+
+To fix the workflow bug, swap the two `PROMOTIONS` lines in
+[workflows/open-account.ts](workflows/open-account.ts) (or the two `BONUS_RATES` lines in the
+[Java workflow](../../java/src/main/java/io/temporal/demo/wealthmanagement/workflow/OpenInvestmentAccountWorkflowImpl.java))
+and restart the worker. Turning the switch off doesn't help, because the promo code is part of the
+workflow's input. Workflow task retries back off (to as much as 10 minutes), so after a fix it can take
+from a few seconds to a minute or so for the workflow to resume. Afterwards, `git checkout` the file to
+re-arm the bug.
+
+A few things to know:
+
+* The flags live in Redis (`chaos:flags`), so every worker using that Redis sees them. To test without
+  disturbing someone else's demo, use a different Redis or Temporal server.
+* The linked bank balances and the transfer ledger are in `data/funding-accounts.json`, and the demo
+  updates them (and `data/investments.json`) as accounts are opened and rolled back.
+* Retries are unlimited, so a bad Gemini API key now stalls a turn instead of failing it. Check the
+  pending activity in the Temporal UI.
+
+### Running the tests
+
+```shell
+npm test
+```
+
+The tests run the Open Account workflow against a local Temporal test server with stub activities
+(no Redis, Gemini key or worker needed). They cover the saga (happy path, rollback in reverse order,
+undoing only completed steps, transient retries), the promo-code bug pausing the workflow, the business
+rules, idempotent transfers, and the 429 handling.
 
 ## Running the demo in Temporal Cloud
 

@@ -1,13 +1,16 @@
 // @temporalio/ai-sdk must load first — its side-effect import installs
 // `TransformStream`, `Headers`, and `structuredClone` polyfills that
 // `ai`'s transitive `eventsource-parser` references at evaluation time.
-import { temporalProvider } from '@temporalio/ai-sdk';
+import { TemporalProvider } from '@temporalio/ai-sdk';
 import {
   proxyActivities,
   getExternalWorkflowHandle,
   startChild,
   uuid4,
+  workflowInfo,
   log,
+  ActivityFailure,
+  ApplicationFailure,
 } from '@temporalio/workflow';
 import { generateText, tool, hasToolCall, ModelMessage, AssistantModelMessage, ToolModelMessage, ToolSet } from 'ai';
 import { z } from 'zod';
@@ -19,7 +22,8 @@ import {
   OPEN_ACCOUNT_AGENT_NAME, OPEN_ACCOUNT_HANDOFF, OPEN_ACCOUNT_INSTRUCTIONS,
 } from '../../common/agent-constants';
 import { ClientContext } from '../../common/account-context';
-import { ChatInteraction, OpenInvestmentAccountInput } from '../shared';
+import { ChatInteraction, OpenInvestmentAccountInput, llmTaskQueue } from '../shared';
+import { LLM_RETRY_POLICY, TOOL_RETRY_POLICY } from '../retry-policies';
 import type * as beneficiaryActivities from '../activities/beneficiaries';
 import type * as investmentActivities from '../activities/investments';
 import type * as openAccountActivities from '../activities/open-account';
@@ -30,13 +34,25 @@ import type * as openAccountActivities from '../activities/open-account';
 
 const beneficiariesActs = proxyActivities<typeof beneficiaryActivities>({
   startToCloseTimeout: '30s',
+  retry: TOOL_RETRY_POLICY,
 });
 const investmentActs = proxyActivities<typeof investmentActivities>({
   startToCloseTimeout: '30s',
+  retry: TOOL_RETRY_POLICY,
 });
 const openAccountActs = proxyActivities<typeof openAccountActivities>({
   startToCloseTimeout: '30s',
+  retry: TOOL_RETRY_POLICY,
 });
+
+// The reason for a non-retryable business-rule failure, or undefined for any other error.
+// The model would otherwise only see the generic "Activity task failed".
+function businessRuleReason(err: unknown): string | undefined {
+  if (err instanceof ActivityFailure && err.cause instanceof ApplicationFailure && err.cause.nonRetryable) {
+    return err.cause.message;
+  }
+  return undefined;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -131,6 +147,15 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       }),
       execute: async ({ client_id, account_name, initial_amount }) => {
         ctx.clientContext.clientId = client_id;
+        try {
+          await investmentActs.validateNewAccount(client_id, account_name, initial_amount);
+        } catch (err) {
+          const reason = businessRuleReason(err);
+          if (reason === undefined) throw err;
+          ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → rejected: ${reason}`);
+          return { message: `The account cannot be opened: ${reason}` };
+        }
+        const promo_code = await investmentActs.findPromotion(client_id);
         const childId = `open-account-${uuid4()}`;
         ctx.childWorkflowId = childId;
         ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childId}`);
@@ -139,6 +164,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           account_name,
           initial_amount,
           parent_workflow_id: ctx.parentWorkflowId,
+          promo_code,
         };
         // Without a task queue the child runs on this worker's; with one it can run in Java
         const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
@@ -180,7 +206,8 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       },
     }),
     get_account_status: tool({
-      description: 'Check the current status of the account opening workflow.',
+      description:
+        'Check the current status of the account opening workflow. "Complete" or "Rolled back..." means it has finished.',
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`get_account_status(${child_workflow_id})`);
@@ -301,6 +328,14 @@ async function runAgentLoop(
   let currentAgent = startAgent;
   let currentMessages = messages;
   const agentDefs = buildAgentDefs(ctx);
+  // Model calls run as activities on their own task queue (see worker.ts), retried until the model recovers
+  const provider = new TemporalProvider({
+    languageModel: {
+      taskQueue: llmTaskQueue(workflowInfo().taskQueue),
+      startToCloseTimeout: '2 minutes',
+      retry: LLM_RETRY_POLICY,
+    },
+  });
 
   // eslint-disable-next-line no-constant-condition
   while (true) {
@@ -308,7 +343,7 @@ async function runAgentLoop(
     log.info(`[${def.name}] generating response`);
 
     const result = await generateText({
-      model: temporalProvider.languageModel('gemini-2.5-pro'),
+      model: provider.languageModel('gemini-2.5-pro'),
       system: def.instructions(ctx),
       messages: currentMessages,
       tools: def.tools as any,
