@@ -1,14 +1,15 @@
 # Wealth Management Agent Example using Vercel AI SDK 
 
-Demonstrates how to use [Vercel AI SDK](https://ai-sdk.dev/) with [Temporal](https://temporal.io/) 
-It runs the agent loop inside a Temporal Activity as a durable, replayable, long-running conversation. 
-It uses tools to hand off to other agents.
+Demonstrates how to use [Vercel AI SDK](https://ai-sdk.dev/) with [Temporal](https://temporal.io/).
+It runs the agent loop inside a Temporal Workflow as a durable, replayable, long-running conversation,
+with each model call and tool call running as an Activity. It uses tools to hand off to other agents.
 
 Scenarios currently implemented include
 * Add Beneficiary - add a new beneficiary to your account
 * List Beneficiaries - shows a list of beneficiaries and their relationship to the account owner
 * Delete Beneficiary - delete a beneficiary from your account
-* Open Investment Account - opens a new investment account using a **Child Workflow**
+* Open Investment Account - opens a new investment account using a **Child Workflow**, which can optionally
+  run in [Java](../../java/README.md). Opening is a saga: if a step fails, the steps already done are undone.
 * List Investments - shows a list of accounts and their current balances
 * Close Investment Account - closes an investment account
 
@@ -35,9 +36,10 @@ agents and business logic that drive the agentic application.
 ## Prerequisites
 
 - [Node.js 20+](https://nodejs.org/)
-- [Temporal CLI](https://github.com/temporalio/cli) the Temporal CLI
-- [Redis](https://redis.io/) (used for chat history; optionally for the claim-check payload codec)
+- [Temporal CLI](https://github.com/temporalio/cli)
+- [Redis](https://redis.io/) (used for chat history and the chaos panel; optionally for the claim-check payload codec)
 - A [Google Gemini API key](https://aistudio.google.com/app/apikey)
+- Java 21 or later (optional, only to run the Open Account workflow in [Java](../../java/README.md))
 
 ## Install dependencies
 
@@ -80,8 +82,10 @@ The original data is stored in Redis. This uses a
 that intercepts data going to Temporal Cloud, replaces it with a GUID. When the data is retrieved, it looks up the GUID
 replaces it with the data stored in Redis.
 
+From the project root:
+
 ```shell
-cp setclaimcheck.example setclaimcheck.sh
+cp setclaimcheck.sh.example setclaimcheck.sh
 chmod +x setclaimcheck.sh
 ```
 
@@ -114,6 +118,7 @@ Be sure you have updated the setclaimcheck.sh as mentioned above.
 
 To run the Codec Server:
 ```shell
+cd src/temporal_supervisor
 ./startcodecserver.sh
 ```
 
@@ -146,14 +151,15 @@ If you remove the codec server settings, you won't be able to see anything other
 
 ## Running the Demo locally
 
-### Start the Worker 
+Run each of these in its own terminal, starting from the project root.
 
-Start Temporal locally
+### Start Temporal
+
 ```shell
 temporal server start-dev
 ```
 
-### Connect locally
+### Start the Worker
 
 ```shell
 cd src/temporal_supervisor
@@ -178,25 +184,33 @@ cd java
 ### Start the API
 
 ```shell
-cd src/api
+cd api
 ./startlocalapi.sh
 ```
 
 ### Start the UX
 
 ```shell
-cd src/frontend
+cd frontend
+npm install   # first time only
 npm start
 ```
 
 A new browser window opens where you can interact with the application.
 
-If you are opening a new investment account, in another terminal
 ### Send the Compliance Reviewed Signal
+
+When you open a new investment account, the workflow waits for a compliance review. To approve it:
+
 ```shell
 cd src/temporal_supervisor
-./localsendcomplianceappoval.sh <Child Workflow ID>
+./localsendcomplianceapproval.sh <Child Workflow ID>
 ```
+
+The child workflow ID is `open-account-<client ID>-<account name>`, lowercased with dashes for spaces
+and punctuation. For example, opening "Car" for client 123 gives `open-account-123-car`. You can also
+find it in the Temporal UI. Because the ID comes from the account name, only one opening per account runs
+at a time: if the agent asks to open the same account again, it continues the opening already in progress.
 
 ## Failure scenarios (chaos panel)
 
@@ -232,8 +246,10 @@ A few things to know:
   disturbing someone else's demo, use a different Redis or Temporal server.
 * The linked bank balances and the transfer ledger are in `data/funding-accounts.json`, and the demo
   updates them (and `data/investments.json`) as accounts are opened and rolled back.
-* Retries are unlimited, so a bad Gemini API key now stalls a turn instead of failing it. Check the
+* Retries are unlimited, so a bad Gemini API key stalls a turn instead of failing it. Check the
   pending activity in the Temporal UI.
+* If you change which activities or child workflows a workflow runs, end the chats started on the old
+  code; they would fail on replay. The workflow-bug fix above is safe because it doesn't change the steps.
 
 ### Running the tests
 
@@ -243,15 +259,17 @@ npm test
 
 The tests run the Open Account workflow against a local Temporal test server with stub activities
 (no Redis, Gemini key or worker needed). They cover the saga (happy path, rollback in reverse order,
-undoing only completed steps, transient retries), the promo-code bug pausing the workflow, the business
-rules, idempotent transfers, and the 429 handling.
+undoing only completed steps, transient retries), the promo-code bug pausing the workflow, starting only
+one opening per account, the business rules, idempotent transfers, and the 429 handling. The Java
+workflow has its own tests: `cd java && ./gradlew test`.
 
 ## Running the demo in Temporal Cloud
 
-Copy the setcloudenv.example, located in the src/temporal_supervisor folder to the project root and name it setcloudenv.sh.
+Copy setcloudenv.example from the src/temporal_supervisor folder to the project root as setcloudenv.sh.
+From the project root:
 
 ```shell
-cp  src/temporal_supervisor/setcloudenv.example setcloudenv.sh
+cp src/temporal_supervisor/setcloudenv.example setcloudenv.sh
 ```
 
 Edit setcloudenv.sh to match your Temporal Cloud account:
@@ -263,6 +281,10 @@ export TEMPORAL_TLS_CLIENT_CERT_PATH="/path/to/cert.pem"
 export TEMPORAL_TLS_CLIENT_KEY_PATH="/path/to/key.key"
 ```
 
+To use an API key instead of certificates, replace the two certificate lines with
+`export TEMPORAL_API_KEY=<your-api-key>`. `setcloudenv.sh` is gitignored; keep keys and certificates
+out of the repository.
+
 ### Start the Worker
 
 ```shell
@@ -270,23 +292,27 @@ cd src/temporal_supervisor
 ./startcloudworker.sh
 ```
 
+To run the Open Account workflow in Java, use `./startcloudworker.sh OpenAccount` here and in `java/`
+(see [Run the Open Account workflow in Java](#run-the-open-account-workflow-in-java-optional)).
+
 ### Start the API
 
 ```shell
-cd src/api
+cd api
 ./startcloudapi.sh
 ```
 
 ### Start the UX
 
 ```shell
-cd src/frontend
+cd frontend
+npm install   # first time only
 npm start
 ```
 
-If you are opening a new investment account, in another terminal
-
 ### Send the Compliance Reviewed Signal
+
+When you open a new investment account, approve the compliance review with:
 
 ```shell
 cd src/temporal_supervisor
