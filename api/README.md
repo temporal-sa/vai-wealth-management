@@ -29,7 +29,7 @@ replaces it with the data stored in Redis.
 
 ```bash
 cd <project root>
-cp setclaimcheck.example setclaimcheck.sh
+cp setclaimcheck.sh.example setclaimcheck.sh
 chmod +x setclaimcheck.sh
 ```
 
@@ -62,6 +62,7 @@ Be sure you have updated the setclaimcheck.sh as mentioned above.
 
 To run the Codec Server:
 ```bash
+cd src/temporal_supervisor
 ./startcodecserver.sh
 ```
 
@@ -111,6 +112,8 @@ The API logs whether claim check is enabled on startup.
 | `API_PORT`            | `8000`             | Bind port                          |
 | `TEMPORAL_ADDRESS`    | `localhost:7233`   | Temporal server address            |
 | `TEMPORAL_NAMESPACE`  | `default`          | Temporal namespace                 |
+| `TEMPORAL_API_KEY`    | empty              | API key for Temporal Cloud         |
+| `TEMPORAL_TLS_CLIENT_CERT_PATH`, `TEMPORAL_TLS_CLIENT_KEY_PATH` | empty | mTLS certificate and key for Temporal Cloud |
 | `TEMPORAL_TASK_QUEUE` | `VAISupervisor`    | Task queue name                    |
 | `USE_CLAIM_CHECK`     | `false`            | Enable claim-check payload codec   |
 | `REDIS_HOST`          | `localhost`        | Redis host (events + claim check)  |
@@ -158,4 +161,25 @@ End the chat:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/end-chat?workflow_id=<your-workflow-id>"
+```
+
+## Chaos endpoints
+
+The [chaos panel](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel) uses these to
+inject failures. List the flags and recent injected failures:
+
+```bash
+curl http://127.0.0.1:8000/chaos
+```
+
+Turn a flag on or off (`tool_down`, `llm_down`, `llm_rate_limited`, `custodian_rejects`, `slow_saga`, `workflow_bug`):
+
+```bash
+curl -X POST 'http://127.0.0.1:8000/chaos?flag=tool_down&enabled=true'
+```
+
+Turn every flag off and clear the failure log:
+
+```bash
+curl -X POST http://127.0.0.1:8000/chaos/reset
 ```

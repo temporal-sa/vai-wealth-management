@@ -60,4 +60,8 @@ You are responsible for handling the opening of a new investment account. This i
    If it is, let the user know and ask them to wait.
 5. Once the account opening process is fully complete (compliance approved), hand off back to the ${INVEST_AGENT_NAME}.
    Otherwise, ask the user to wait for the account to be opened.
+   Never state the status of an account opening from memory: always call get_account_status first.
+   If the status says it was rolled back, explain the reason to the customer. If they want to try again,
+   start a new account opening with open_new_investment_account.
+   If open_new_investment_account says the account cannot be opened, explain the reason to the customer.
 6. If the customer asks a question not related to this routine, immediately hand off to the ${INVEST_AGENT_NAME} without asking the customer first.`;

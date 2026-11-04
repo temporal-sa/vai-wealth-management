@@ -5,7 +5,9 @@ A multi-agent wealth-management demo built with the [Vercel AI SDK](https://ai-s
 A supervisor agent routes customer requests to specialist sub-agents (beneficiaries, investments, open account). Two flavors are included:
 
 - A **non-Temporal CLI** that runs the same agent loop in a single process — useful for iterating on prompts and tools.
-- A **Temporal-integrated** flavor where the agent runs inside a Temporal Workflow as a durable, replayable, long-running conversation. A child workflow handles a multi-step "open new investment account" flow with KYC and compliance checkpoints.
+- A **Temporal-integrated** flavor where the agent runs inside a Temporal Workflow as a durable, replayable, long-running conversation. A child workflow handles a multi-step "open new investment account" flow with KYC and compliance checkpoints. The child workflow can optionally run in [Java](java/README.md), showing a polyglot (TypeScript + Java) application.
+
+The Temporal flavor also has a **Chaos Panel** that injects failures at runtime (API and LLM outages, rate limits, a saga rollback, a bug in workflow code) to show how Temporal recovers. See [Failure scenarios](src/temporal_supervisor/README.md#failure-scenarios-chaos-panel).
 
 ![Architecture](images/architecture.png)
 
@@ -15,6 +17,7 @@ A supervisor agent routes customer requests to specialist sub-agents (beneficiar
 - [Temporal CLI](https://github.com/temporalio/cli) (only required for the Temporal flavor)
 - [Redis](https://redis.io/) (used by the Temporal flavor for chat history; optionally for the claim-check payload codec)
 - A [Google Gemini API key](https://aistudio.google.com/app/apikey)
+- Java 21 or later — optional, only to run the Open Account workflow in [Java](java/README.md)
 
 ## Install dependencies
 
@@ -40,3 +43,4 @@ Pick the flavor you want to run:
 
 - **[Vercel AI SDK Only CLI](src/vai_supervisor/README.md)** — run the agent using Vercel AI SDK via the command line.
 - **[Temporal Version](src/temporal_supervisor/README.md)** — run the durable agent Temporal version
+- **[Open Account workflow in Java](java/README.md)** — run the Open Account child workflow in Java alongside the TypeScript supervisor

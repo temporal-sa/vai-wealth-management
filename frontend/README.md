@@ -14,7 +14,9 @@ Note that the web application communicates directly with the API and the API is 
 communicates with Temporal running locally or in the cloud.
 
 ## Install Dependencies
+From the project root:
 ```bash
+cd frontend
 npm install
 ```
 
@@ -24,8 +26,11 @@ cd frontend
 npm start
 ```
 
-Remember, if you are opening a new investment account, in another terminal
-select either 
+Click **Chaos** in the header to open the chaos panel, which injects failures to show how Temporal
+recovers (see [Failure scenarios](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel)).
+
+When you open a new investment account, approve the compliance review in another terminal with
+either 
 ### Send the Compliance Reviewed Signal (Local)
 ```bash
 cd src/temporal_supervisor

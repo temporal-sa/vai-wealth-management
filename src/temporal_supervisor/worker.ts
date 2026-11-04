@@ -5,6 +5,8 @@ import { google } from '@ai-sdk/google';
 import * as activities from './activities/activities';
 import { ClientHelper } from '../common/client-helper';
 import { buildDataConverter } from '../common/data-converter';
+import { chaosAwareProvider } from './chaos-model';
+import { llmTaskQueue } from './shared';
 
 // ---------------------------------------------------------------------------
 // Concise logger — strip SDK-internal metadata, one line per entry
@@ -33,11 +35,28 @@ function logClaimCheckStatus(): void {
   }
 }
 
+function logOpenAccountTaskQueue(taskQueue: string): void {
+  const openAccountQueue = process.env.TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT;
+  if (openAccountQueue) {
+    console.error(`Open Account workflow runs on task queue ${openAccountQueue}; remember to start the Java worker`);
+  } else {
+    console.error(`Open Account workflow runs on this worker (task queue ${taskQueue})`);
+  }
+}
+
+// Optional cap on model calls per second across all workers, enforced by the Temporal server
+function llmMaxCallsPerSecond(): number | undefined {
+  const value = Number(process.env.LLM_MAX_CALLS_PER_SECOND);
+  return value > 0 ? value : undefined;
+}
+
 async function run() {
   logClaimCheckStatus();
   const helper = new ClientHelper();
+  logOpenAccountTaskQueue(helper.taskQueue);
   const connection = await NativeConnection.connect(helper.nativeConnectionOptions);
   try {
+    const plugin = new AiSdkPlugin({ modelProvider: chaosAwareProvider(google) });
     const worker = await Worker.create({
       connection,
       namespace: helper.namespace,
@@ -45,7 +64,7 @@ async function run() {
       workflowsPath: require.resolve('./workflows/index'),
       activities,
       dataConverter: buildDataConverter(),
-      plugins: [new AiSdkPlugin({ modelProvider: google })],
+      plugins: [plugin],
       // @temporalio/ai-sdk's barrel re-exports activity-side code alongside
       // the workflow-safe temporalProvider; the bundler stubs them. Crypto is
       // pulled in transitively by the same path. None are reachable from
@@ -55,7 +74,22 @@ async function run() {
       },
     });
 
-    await worker.run();
+    // Model calls run on their own task queue, so the server can rate limit them.
+    // The plugin registers the model activities on every worker it is given.
+    const llmQueue = llmTaskQueue(helper.taskQueue);
+    const maxCallsPerSecond = llmMaxCallsPerSecond();
+    console.error(`Model calls run on task queue ${llmQueue}` +
+      (maxCallsPerSecond ? `, limited to ${maxCallsPerSecond} per second` : ''));
+    const llmWorker = await Worker.create({
+      connection,
+      namespace: helper.namespace,
+      taskQueue: llmQueue,
+      dataConverter: buildDataConverter(),
+      plugins: [plugin],
+      maxTaskQueueActivitiesPerSecond: maxCallsPerSecond,
+    });
+
+    await Promise.all([worker.run(), llmWorker.run()]);
   } finally {
     // Close the connection once the worker has stopped
     await connection.close();

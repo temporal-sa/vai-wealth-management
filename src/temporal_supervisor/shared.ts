@@ -1,5 +1,10 @@
 export const TASK_QUEUE_NAME = 'VAISupervisor';
 
+// Model calls run on their own task queue, so the server can rate limit them across all workers
+export function llmTaskQueue(taskQueue: string): string {
+  return `${taskQueue}-llm`;
+}
+
 // Signal names — must match the Python temporal_supervisor signal definitions exactly
 export const PROCESS_USER_MESSAGE_SIGNAL = 'process_user_message';
 export const END_WORKFLOW_SIGNAL = 'end_workflow';
@@ -29,6 +34,13 @@ export interface OpenInvestmentAccountInput {
   account_name: string;
   initial_amount: number;
   parent_workflow_id: string;
+  // Set when a promotion is running for the new account (e.g. "WELCOME-BONUS")
+  promo_code?: string | null;
+}
+
+export interface OpenInvestmentAccountOutput {
+  account_created: boolean;
+  message: string;
 }
 
 export interface WealthManagementClient {
