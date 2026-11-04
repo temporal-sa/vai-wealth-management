@@ -9,27 +9,34 @@ How the two sides fit together:
 * When the TypeScript worker has `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` set, the supervisor starts
   `OpenInvestmentAccountWorkflow` as a child workflow on that task queue, which this worker polls.
   Without it, the child runs in TypeScript on the supervisor's task queue.
-* This workflow calls the TypeScript activities (`getClient`, and the saga steps `openInvestment`,
-  `debitLinkedAccount`, `registerAccount` with their compensations `closeInvestment` and `creditLinkedAccount`)
-  by name on the TypeScript task queue (`TEMPORAL_TASK_QUEUE`, default `VAISupervisor`).
+* This workflow calls the TypeScript activities (`getClient`, `updateClient` when the customer corrects their
+  details during KYC, and the saga steps `openInvestment`, `debitLinkedAccount`, `registerAccount` with their
+  compensations `closeInvestment` and `creditLinkedAccount`) by name on the TypeScript task queue
+  (`TEMPORAL_TASK_QUEUE`, default `VAISupervisor`).
   The chaos panel's flags are read inside those activities, so every failure scenario works with this worker too
   (see [Failure scenarios](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel)).
-* It reports progress by signalling `update_status` on the parent workflow, as the TypeScript version does.
-  Signals are routed by workflow ID, so the different task queue doesn't matter.
-* The workflow type, queries (`get_current_state`, `get_client_details`), update (`update_client_details`)
-  and signals (`verify_kyc`, `compliance_approved`) match the TypeScript version, so the agent tools and
+* It reports each state change by signalling `update_status` on the parent workflow with
+  `{account_name, state, workflow_id}`, as the TypeScript version does. Signals are routed by workflow ID,
+  so the different task queue doesn't matter.
+* The workflow type, query (`get_current_state`), updates (`get_client_details`, which waits until the client
+  details are loaded, and `update_client_details`, which saves corrected details and approves KYC) and signals
+  (`verify_kyc`, `compliance_approved`) match the TypeScript version, so the agent tools and
   `localsendcomplianceapproval.sh` drive either implementation unchanged.
 * When `USE_CLAIM_CHECK=true`, payloads go through the same Redis claim check as the TypeScript worker, in the
   same format, so either side (and the codec server) can decode them.
 
 ## Prerequisites
 
-* Java 21 or later (Gradle is provided by the wrapper)
-* Everything the TypeScript demo needs (see [the Temporal README](../src/temporal_supervisor/README.md))
+* JDK 25 or later, as `JAVA_HOME` or `java` on the `PATH` (Gradle 9.8.2 is provided by the wrapper, so no separate
+  Gradle install is needed)
+* Everything the TypeScript demo needs (see [the Temporal README](../src/temporal_supervisor/README.md)),
+  including a running TypeScript worker: it hosts the activities this workflow calls
 
 ## Running
 
-Pass the same task queue name to the TypeScript worker and to this worker.
+Pass the same task queue name to the TypeScript worker and to this worker. The argument is required; the
+script sets `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` from it, builds the jar with the Gradle wrapper and starts it
+(`runworker.sh`). The scripts can be run from any directory.
 
 ```bash
 # terminal 1
@@ -41,8 +48,9 @@ cd java
 ./startlocalworker.sh OpenAccount
 ```
 
-For Temporal Cloud, use `startcloudworker.sh` in both places. It reads the connection settings from
-`setcloudenv.sh` in the project root, the same file the TypeScript worker uses.
+For Temporal Cloud, use `startcloudworker.sh` in both places. It reads the connection settings (API key or mTLS)
+from `setcloudenv.sh` in the project root, the same file the TypeScript worker uses (see
+[Running the demo in Temporal Cloud](../src/temporal_supervisor/README.md#running-the-demo-in-temporal-cloud)).
 
 Both scripts load `../setclaimcheck.sh` if it exists. The worker logs the connection and auth mode it
 uses at startup. If a connection setting seems to be ignored, check that line.
@@ -66,7 +74,18 @@ An API key turns on TLS automatically. If you run the jar yourself with mTLS, ad
 
 Keep API keys and certificates out of the repository.
 
+## The workflow bug
+
+With the **Bug in workflow code** chaos flag on, new openings get a `WELCOME-BONUS` promo code, but `BONUS_RATES`
+in [OpenInvestmentAccountWorkflowImpl.java](src/main/java/io/temporal/demo/wealthmanagement/workflow/OpenInvestmentAccountWorkflowImpl.java)
+is keyed by `WELCOME_BONUS`, so the workflow task fails with a `NullPointerException` after compliance approval
+and the workflow stays Running. To fix it, swap the two `BONUS_RATES` lines and restart this worker. To re-arm the
+bug afterwards, `git checkout` the file. See
+[Failure scenarios](../src/temporal_supervisor/README.md#failure-scenarios-chaos-panel).
+
 ## Tests
+
+From the `java` directory:
 
 ```bash
 ./gradlew test

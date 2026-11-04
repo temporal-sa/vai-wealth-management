@@ -6,9 +6,11 @@ The API is implemented in TypeScript using Express and shares the `ClientHelper`
 
 ## Prerequisites
 
-* [Node.js 20+](https://nodejs.org/)
+* [Node.js 20+](https://nodejs.org/) and npm
 * A running Temporal server (local dev server or Temporal Cloud)
-* A running Redis instance (used by `EventStreamManager` and the claim-check codec)
+* A running Redis instance (used by `EventStreamManager`, the chaos flags and the claim-check codec)
+* A running worker (see [the Temporal README](../src/temporal_supervisor/README.md#start-the-worker)); the API
+  only starts and signals workflows, so without a worker the chat gets no answers
 
 ## Install dependencies
 
@@ -23,12 +25,13 @@ npm install
 An optional configuration is to substitute the data sent to Temporal (e.g. function/method parameters and return values)
 with an ID. This is known as the [Claim Check Pattern](https://www.enterpriseintegrationpatterns.com/patterns/messaging/StoreInLibrary.html).
 The original data is stored in Redis. This uses a
-[Custom Payload Codec](https://docs.temporal.io/develop/python/converters-and-encryption#custom-payload-codec)
+[Custom Payload Codec](https://docs.temporal.io/develop/typescript/converters-and-encryption)
 that intercepts data going to Temporal Cloud, replaces it with a GUID. When the data is retrieved, it looks up the GUID
 replaces it with the data stored in Redis.
 
+From the project root:
+
 ```bash
-cd <project root>
 cp setclaimcheck.sh.example setclaimcheck.sh
 chmod +x setclaimcheck.sh
 ```
@@ -46,6 +49,9 @@ Save the file and be sure that you have Redis running. For example:
 ```bash
 redis-server
 ```
+
+Claim check is optional. If you don't create `setclaimcheck.sh`, the start scripts print a harmless
+`setclaimcheck.sh: No such file or directory` message and run without claim check.
 
 Note that the application assumes you only have one Redis server that is used by the application for storing the
 conversation history and is also used if Claim Check has been enabled.
@@ -70,7 +76,8 @@ And of course, make sure that your Redis Server is up and running.
 
 Once it's up and running, the default endpoint is http://127.0.0.1:8081.
 
-Open up your browser and navigate to the Temporal UI. Locally that is usually localhost:8233.
+Open up your browser and navigate to the Temporal UI. Locally, open it at exactly http://localhost:8233 (the
+codec server only allows requests from that origin).
 For Temporal Cloud that will be https://cloud.temporal.io
 
 In the upper right, there is an icon that looks like glasses. Click on that and you
@@ -98,11 +105,31 @@ cd api
 From the project root:
 
 ```bash
-cd api 
+cd api
 ./startcloudapi.sh
 ```
 
-The API logs whether claim check is enabled on startup.
+`startcloudapi.sh` reads the Temporal Cloud connection settings from `setcloudenv.sh` in the project root (see
+[Running the demo in Temporal Cloud](../src/temporal_supervisor/README.md#running-the-demo-in-temporal-cloud)).
+Both scripts source `../setclaimcheck.sh` and run `npm run api`. The API logs whether claim check is enabled on startup.
+
+The API listens on http://127.0.0.1:8000 and allows CORS requests from the React UX at
+`http://localhost:3000` and `http://127.0.0.1:3000`.
+
+## Endpoints
+
+All parameters are query parameters.
+
+| Method | Path | Parameters | Purpose |
+|---|---|---|---|
+| GET | `/` | none | Health check |
+| POST | `/start-workflow` | `workflow_id` | Start a `WealthManagementWorkflow` (chat) with that ID |
+| POST | `/send-prompt` | `workflow_id`, `prompt` | Send a customer message (`process_user_message` signal) |
+| GET | `/get-chat-history` | `workflow_id`, `from_index` (default 0) | Chat messages and status updates from Redis, starting at `from_index` |
+| POST | `/end-chat` | `workflow_id` | End the chat (`end_workflow` signal) |
+| GET | `/chaos` | none | Chaos flags and recently injected failures |
+| POST | `/chaos` | `flag`, `enabled` (`true` or anything else for off) | Turn a chaos flag on or off |
+| POST | `/chaos/reset` | none | Turn every chaos flag off and clear the failure log |
 
 ## Configuration
 
@@ -114,7 +141,7 @@ The API logs whether claim check is enabled on startup.
 | `TEMPORAL_NAMESPACE`  | `default`          | Temporal namespace                 |
 | `TEMPORAL_API_KEY`    | empty              | API key for Temporal Cloud         |
 | `TEMPORAL_TLS_CLIENT_CERT_PATH`, `TEMPORAL_TLS_CLIENT_KEY_PATH` | empty | mTLS certificate and key for Temporal Cloud |
-| `TEMPORAL_TASK_QUEUE` | `VAISupervisor`    | Task queue name                    |
+| `TEMPORAL_TASK_QUEUE` | `VAISupervisor`    | Task queue the chat workflow is started on (must match the worker) |
 | `USE_CLAIM_CHECK`     | `false`            | Enable claim-check payload codec   |
 | `REDIS_HOST`          | `localhost`        | Redis host (events + claim check)  |
 | `REDIS_PORT`          | `6379`             | Redis port                         |
