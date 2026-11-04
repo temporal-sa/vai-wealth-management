@@ -61,6 +61,7 @@ Run each from the project root:
 npm test                            # TypeScript workflow tests
 (cd frontend && CI=true npm test)   # React UX tests (after npm install in frontend/)
 (cd java && ./gradlew test)         # Java workflow tests (JDK 25)
+source setllmkey.sh && npm run test:live   # live agent handoff test (calls the Gemini API)
 ```
 
 The TypeScript tests download the Temporal test server on the first run. See [Running the tests](src/temporal_supervisor/README.md#running-the-tests).

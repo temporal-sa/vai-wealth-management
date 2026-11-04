@@ -17,6 +17,7 @@ import {
   INVEST_AGENT_NAME, INVEST_HANDOFF, INVEST_INSTRUCTIONS,
   SUPERVISOR_AGENT_NAME, SUPERVISOR_HANDOFF, SUPERVISOR_INSTRUCTIONS,
   OPEN_ACCOUNT_AGENT_NAME, OPEN_ACCOUNT_HANDOFF, OPEN_ACCOUNT_INSTRUCTIONS,
+  HANDOFF_PROMPT_PREFIX,
 } from '../../common/agent-constants';
 import { ClientContext } from '../../common/account-context';
 import { ChatInteraction, OpenInvestmentAccountInput } from '../shared';
@@ -392,7 +393,7 @@ async function runAgentLoop(
 
     const result = await generateText({
       model: provider.languageModel('gemini-2.5-pro'),
-      system: def.instructions(ctx),
+      system: HANDOFF_PROMPT_PREFIX + def.instructions(ctx),
       messages: currentMessages,
       tools: def.tools as any,
       stopWhen: HANDOFF_STOP_CONDITIONS,

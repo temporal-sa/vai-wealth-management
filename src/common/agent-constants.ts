@@ -1,3 +1,18 @@
+// Prepended to every agent's instructions, like the OpenAI Agents SDK's RECOMMENDED_PROMPT_PREFIX in
+// the reference implementation. Without it, an agent asked about something outside its routine
+// tends to tell the customer it will transfer them (or ask whether they want to be transferred)
+// instead of calling the handoff tool, and the turn ends without an answer.
+export const HANDOFF_PROMPT_PREFIX = `# System context
+You are part of a multi-agent system. Each agent has its own instructions and tools, and can hand off the
+conversation to another agent when appropriate. Handoffs are done by calling a handoff tool, named
+handoff_to_<agent name>. When the customer's request belongs to another agent, call the handoff tool right
+away: do not ask the customer whether they want to be transferred, and do not say that you are transferring
+them. Transfers between agents are handled seamlessly in the background; do not mention or draw attention to
+these transfers in your conversation with the customer. The agent you hand off to answers the customer's
+request.
+
+`;
+
 export const BENE_AGENT_NAME = 'Beneficiary Agent';
 export const BENE_HANDOFF =
   "A helpful agent that handles changes to a customer's beneficiaries. It can list, add and delete beneficiaries.";

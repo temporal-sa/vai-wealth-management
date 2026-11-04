@@ -21,6 +21,7 @@ import {
   SUPERVISOR_AGENT_NAME,
   SUPERVISOR_HANDOFF,
   SUPERVISOR_INSTRUCTIONS,
+  HANDOFF_PROMPT_PREFIX,
 } from '../common/agent-constants';
 import { ClientContext } from '../common/account-context';
 import { BeneficiariesManager } from '../common/beneficiaries-manager';
@@ -222,7 +223,7 @@ const handoffStopConditions = [
 // ---------------------------------------------------------------------------
 
 function buildSystemPrompt(agentName: AgentName): string {
-  const base = agentDefs[agentName].instructions;
+  const base = HANDOFF_PROMPT_PREFIX + agentDefs[agentName].instructions;
   if (agentName === 'supervisor' || !clientContext.clientId) return base;
   return `${base}\n\nThe customer's client ID is: ${clientContext.clientId}. Do not ask for it again.`;
 }

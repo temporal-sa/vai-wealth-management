@@ -375,6 +375,22 @@ cd java
 ./gradlew test
 ```
 
+#### Live agent handoff test
+
+`npm test` uses a scripted model, so it can't check what the model decides to do. The live test runs the real
+chat workflow against Gemini: the customer asks about beneficiaries, gives client ID 123, then asks what
+investments they have. The Beneficiary Agent must hand the conversation to the Investment Agent (through the
+supervisor) in the same turn, without asking the customer whether to transfer or announcing the transfer, and
+the reply must list the investment accounts. It calls the paid Gemini API, so it isn't part of `npm test`:
+
+```shell
+source setllmkey.sh
+npm run test:live
+LIVE_TEST_RUNS=10 npm run test:live   # repeat the conversation, since model output varies
+```
+
+Redis is optional for this test (without it, the chaos flags read as off).
+
 ## Running the demo in Temporal Cloud
 
 Copy setcloudenv.example from the src/temporal_supervisor folder to the project root as setcloudenv.sh.
