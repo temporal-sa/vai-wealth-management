@@ -95,7 +95,11 @@ async function run() {
   }
 }
 
-run().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+run()
+  // Exit once the workers have shut down (e.g. on SIGINT/SIGTERM): the Redis clients the activities
+  // use would otherwise keep the process alive
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

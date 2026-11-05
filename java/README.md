@@ -48,6 +48,18 @@ cd java
 ./startlocalworker.sh OpenAccount
 ```
 
+To try the Java workflow without the chat, API or UX, run the open-account scenarios against it with the
+same task queue name (see
+[Testing the open-account workflow on its own](../src/temporal_supervisor/README.md#testing-the-open-account-workflow-on-its-own)):
+
+```bash
+# terminal 1
+java/startlocalworker.sh OpenAccount
+
+# terminal 2 (starts its own TypeScript worker for the activities)
+src/temporal_supervisor/startlocalopenaccount.sh OpenAccount
+```
+
 For Temporal Cloud, use `startcloudworker.sh` in both places. It reads the connection settings (API key or mTLS)
 from `setcloudenv.sh` in the project root, the same file the TypeScript worker uses (see
 [Running the demo in Temporal Cloud](../src/temporal_supervisor/README.md#running-the-demo-in-temporal-cloud)).

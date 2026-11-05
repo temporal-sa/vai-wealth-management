@@ -64,4 +64,6 @@ npm test                            # TypeScript workflow tests
 source setllmkey.sh && npm run test:live   # live agent handoff test (calls the Gemini API)
 ```
 
+To exercise the Open Account workflow by hand without the chat or the LLM, run `src/temporal_supervisor/startlocalopenaccount.sh` (needs Temporal running; see [Testing the open-account workflow on its own](src/temporal_supervisor/README.md#testing-the-open-account-workflow-on-its-own)).
+
 The TypeScript tests download the Temporal test server on the first run. See [Running the tests](src/temporal_supervisor/README.md#running-the-tests).

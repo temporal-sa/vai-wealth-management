@@ -85,10 +85,12 @@ export async function OpenInvestmentAccountWorkflow(
 
   // Every state change is visible to get_account_status and reported to the parent, which shows
   // it in the UI's status area. Signals are routed by workflow ID, so this reaches the parent
-  // whichever task queue it runs on.
+  // whichever task queue it runs on. Without a parent (the workflow was started on its own, e.g. by
+  // run_open_account_workflow.ts) there is no one to report to.
   async function setState(newState: string) {
     state = newState;
     log.info(`State: ${newState}`, { account_name });
+    if (!parent_workflow_id) return;
     const update: UpdateStatusInput = { account_name, state: newState, workflow_id: workflowInfo().workflowId };
     await getExternalWorkflowHandle(parent_workflow_id).signal(UPDATE_STATUS_SIGNAL, update);
   }

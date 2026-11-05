@@ -187,11 +187,16 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
 
     // Every state change is visible to get_account_status and reported to the parent, which shows it
     // in the UI's status area. Signals are routed by workflow ID, not task queue, so this reaches the
-    // TypeScript supervisor even though it runs on a different task queue.
+    // TypeScript supervisor even though it runs on a different task queue. Without a parent (the workflow
+    // was started on its own, e.g. by run_open_account_workflow.ts) there is no one to report to.
     private void setState(String newState) {
         state = newState;
         log.info("State: {} for {}", newState, input.accountName());
-        Workflow.newUntypedExternalWorkflowStub(input.parentWorkflowId())
+        String parentWorkflowId = input.parentWorkflowId();
+        if (parentWorkflowId == null || parentWorkflowId.isEmpty()) {
+            return;
+        }
+        Workflow.newUntypedExternalWorkflowStub(parentWorkflowId)
                 .signal("update_status", UpdateStatusInput.accountState(
                         input.accountName(), newState, Workflow.getInfo().getWorkflowId()));
     }

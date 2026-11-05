@@ -18,7 +18,8 @@
     "api.watch": "nodemon src/api/server.ts",
     "test": "mocha --exit --require ts-node/register --require source-map-support/register src/temporal_supervisor/mocha/*.test.ts",
     "test:live": "mocha --exit --require ts-node/register --require source-map-support/register src/temporal_supervisor/mocha/*.live.ts",
-    "compliance.approval": "ts-node src/temporal_supervisor/run_send_compliance_approval.ts"
+    "compliance.approval": "ts-node src/temporal_supervisor/run_send_compliance_approval.ts",
+    "open-account.scenarios": "ts-node src/temporal_supervisor/run_open_account_workflow.ts"
   },
   "nodemonConfig": {
     "execMap": {
