@@ -2,20 +2,23 @@
 // for the supervisor that records the status signals the Open Account workflow sends it.
 import { condition, defineQuery, defineSignal, setHandler } from '@temporalio/workflow';
 import type { OpenInvestmentAccountInput, UpdateStatusInput } from '../shared';
-import { UPDATE_STATUS_SIGNAL } from '../shared';
+import { UPDATE_STATUS_SIGNAL, statusText } from '../shared';
 import { startOpenAccount } from '../workflows/start-open-account';
 
 export { OpenInvestmentAccountWorkflow } from '../workflows/open-account';
 
 export const getStatusesQuery = defineQuery<string[]>('get_statuses');
 
+// Records the status text the supervisor would show, and finishes once the opening has finished
 export async function TestParentWorkflow(): Promise<string[]> {
   const statuses: string[] = [];
-  setHandler(defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL), ({ status }) => {
-    statuses.push(status);
+  let finished = false;
+  setHandler(defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL), (update) => {
+    statuses.push(statusText(update));
+    finished ||= update.state === 'Complete' || !!update.state?.startsWith('Rolled back');
   });
   setHandler(getStatusesQuery, () => statuses);
-  await condition(() => statuses.some((s) => s.endsWith('successfully opened.') || s.endsWith('rolled back.')));
+  await condition(() => finished);
   return statuses;
 }
 

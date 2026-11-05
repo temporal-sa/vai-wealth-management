@@ -24,11 +24,13 @@ public interface OpenInvestmentAccountWorkflow {
     @QueryMethod(name = "get_current_state")
     String getCurrentState();
 
-    @QueryMethod(name = "get_client_details")
+    // An update rather than a query, so it waits until the client details have been loaded
+    @UpdateMethod(name = "get_client_details")
     WealthManagementClient getClientDetails();
 
+    // Saves the corrected client details, which also approves KYC. Returns the saved record.
     @UpdateMethod(name = "update_client_details")
-    void updateClientDetails(Map<String, Object> fields);
+    WealthManagementClient updateClientDetails(Map<String, Object> fields);
 
     @SignalMethod(name = "verify_kyc")
     void verifyKyc();

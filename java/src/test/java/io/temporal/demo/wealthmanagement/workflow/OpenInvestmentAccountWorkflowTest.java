@@ -95,30 +95,51 @@ class OpenInvestmentAccountWorkflowTest {
 
         assertTrue(result.accountCreated());
         assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + CHILD_ID + "-initial-deposit", "register:" + INVESTMENT_ID), tsActivities.calls);
+                "debit:1000.0/" + initialDepositId(child), "register:" + INVESTMENT_ID), tsActivities.calls);
         assertEquals(List.of(
-                "Account \"College Fund\" is waiting for KYC verification.",
-                "KYC approved. Account \"College Fund\" is waiting for compliance review.",
-                "Opening account \"College Fund\": Creating the account record.",
-                "Opening account \"College Fund\": Transferring $1,000.00 from the linked bank account.",
-                "Opening account \"College Fund\": Registering the account with the custodian.",
-                "Account \"College Fund\" has been successfully opened."), parent.getStatuses());
+                "Waiting KYC",
+                "Waiting Compliance Review",
+                "Compliance review has been approved. Creating Investment Account",
+                "Creating the account record.",
+                "Transferring $1,000.00 from the linked bank account.",
+                "Registering the account with the custodian.",
+                "Complete"), parent.getStatuses());
         assertEquals("Complete", child.getCurrentState());
     }
 
     @Test
-    void updateClientDetailsChangesOnlyTheGivenFields() {
+    void updateClientDetailsSavesTheDetailsAndApprovesKyc() {
         startParent();
         OpenInvestmentAccountWorkflow child = waitForChild();
 
-        child.updateClientDetails(Map.of("phone", "555-0100", "unknown_field", "ignored"));
+        WealthManagementClient saved = child.updateClientDetails(Map.of("phone", "555-0100"));
 
-        WealthManagementClient details = child.getClientDetails();
-        assertEquals("555-0100", details.phone());
-        assertEquals("Jane", details.firstName());
-        assertEquals("jane@example.com", details.email());
-        // Updating details does not approve KYC; the agent does that separately
-        assertEquals("Waiting KYC", child.getCurrentState());
+        assertEquals("555-0100", saved.phone());
+        assertEquals("Jane", saved.firstName());
+        assertEquals("555-0100", child.getClientDetails().phone());
+        assertTrue(tsActivities.calls.contains("updateClient:" + CLIENT_ID + "/{phone=555-0100}"));
+        // Saving the details approves KYC, so the workflow moves on to compliance review
+        waitForQuery(() -> "Waiting Compliance Review".equals(child.getCurrentState()) ? true : null);
+    }
+
+    @Test
+    void reopeningAfterRollbackUsesANewTransferId() {
+        tsActivities.failures.put("registerAccount", "reject");
+        OpenInvestmentAccountWorkflow first = startAndApprove(null);
+        WorkflowStub.fromTyped(first).getResult(OpenInvestmentAccountOutput.class);
+        String firstDebit = initialDepositId(first);
+        tsActivities.failures.clear();
+        // The parent closes after the final status signal; wait for it so its ID can be reused
+        client.newUntypedWorkflowStub(PARENT_ID).getResult(Void.class);
+
+        // Same parent and child workflow IDs, as when the customer opens the same account again in a chat
+        OpenInvestmentAccountOutput result = runToCompletion(null);
+
+        assertTrue(result.accountCreated());
+        List<String> debits = tsActivities.calls.stream().filter(c -> c.startsWith("debit:")).toList();
+        assertEquals(2, debits.size());
+        assertEquals("debit:1000.0/" + firstDebit, debits.get(0));
+        assertFalse(debits.get(1).equals(debits.get(0)), "a reused transfer ID would not move any money");
     }
 
     @Test
@@ -143,7 +164,7 @@ class OpenInvestmentAccountWorkflowTest {
         assertEquals(List.of("getClient:" + CLIENT_ID,
                 "openInvestment attempt 1 failed", "openInvestment attempt 2 failed",
                 "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + CHILD_ID + "-initial-deposit", "register:" + INVESTMENT_ID), tsActivities.calls);
+                "debit:1000.0/" + initialDepositId(childStub()), "register:" + INVESTMENT_ID), tsActivities.calls);
     }
 
     @Test
@@ -151,14 +172,24 @@ class OpenInvestmentAccountWorkflowTest {
         tsActivities.failures.put("registerAccount", "reject");
         OpenInvestmentAccountWorkflow child = startAndApprove(null);
         OpenInvestmentAccountOutput result = WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
+        TestParentWorkflow parent = client.newWorkflowStub(TestParentWorkflow.class, PARENT_ID);
+        WorkflowStub.fromTyped(parent).getResult(Void.class);
 
         assertFalse(result.accountCreated());
         assertEquals("The account was not opened: registerAccount rejected", result.message());
         assertEquals("Rolled back. The account was not opened: registerAccount rejected.", child.getCurrentState());
+        String transferId = initialDepositId(child);
         assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + CHILD_ID + "-initial-deposit", "register:" + INVESTMENT_ID,
-                "credit:1000.0/" + CHILD_ID + "-initial-deposit-refund", "closeInvestment:" + INVESTMENT_ID),
+                "debit:1000.0/" + transferId, "register:" + INVESTMENT_ID,
+                "credit:1000.0/" + transferId + "-refund", "closeInvestment:" + INVESTMENT_ID),
                 tsActivities.calls);
+        List<String> statuses = parent.getStatuses();
+        assertEquals(List.of(
+                "Failed: registerAccount rejected. Rolling back.",
+                "Rolling back: refunding $1,000.00 to the linked bank account.",
+                "Rolling back: removing the account record.",
+                "Rolled back. The account was not opened: registerAccount rejected."),
+                statuses.subList(statuses.size() - 4, statuses.size()));
     }
 
     @Test
@@ -169,7 +200,7 @@ class OpenInvestmentAccountWorkflowTest {
         assertFalse(result.accountCreated());
         // The debit never happened, so there is nothing to refund
         assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + CHILD_ID + "-initial-deposit", "closeInvestment:" + INVESTMENT_ID),
+                "debit:1000.0/" + initialDepositId(childStub()), "closeInvestment:" + INVESTMENT_ID),
                 tsActivities.calls);
     }
 
@@ -216,7 +247,7 @@ class OpenInvestmentAccountWorkflowTest {
                 "initial_amount", 250,
                 "parent_workflow_id", PARENT_ID));
 
-        Map<?, ?> details = waitForQuery(() -> workflow.query("get_client_details", Map.class));
+        Map<?, ?> details = workflow.update("get_client_details", Map.class);
         assertEquals("Jane", details.get("first_name"));
         assertEquals("single", details.get("marital_status"));
 
@@ -256,11 +287,32 @@ class OpenInvestmentAccountWorkflowTest {
         WorkflowClient.start(parent::run, (String) null);
     }
 
-    // The parent starts the child asynchronously, so poll until the child has loaded the client
+    // The parent starts the child asynchronously, so poll until the child has started. Then
+    // get_client_details waits until it has loaded the client.
     private OpenInvestmentAccountWorkflow waitForChild() {
-        OpenInvestmentAccountWorkflow child = client.newWorkflowStub(OpenInvestmentAccountWorkflow.class, CHILD_ID);
-        waitForQuery(child::getClientDetails);
+        OpenInvestmentAccountWorkflow child = childStub();
+        waitForQuery(child::getCurrentState);
+        child.getClientDetails();
         return child;
+    }
+
+    private OpenInvestmentAccountWorkflow childStub() {
+        return client.newWorkflowStub(OpenInvestmentAccountWorkflow.class, CHILD_ID);
+    }
+
+    // The idempotency key of the initial deposit, which is unique per run of the child
+    private String initialDepositId(OpenInvestmentAccountWorkflow child) {
+        String runId = WorkflowStub.fromTyped(child).getExecution().getRunId();
+        if (runId == null || runId.isEmpty()) {
+            runId = testEnv.getWorkflowServiceStubs().blockingStub()
+                    .describeWorkflowExecution(DescribeWorkflowExecutionRequest.newBuilder()
+                            .setNamespace(testEnv.getNamespace())
+                            .setExecution(io.temporal.api.common.v1.WorkflowExecution.newBuilder()
+                                    .setWorkflowId(CHILD_ID).build())
+                            .build())
+                    .getWorkflowExecutionInfo().getExecution().getRunId();
+        }
+        return CHILD_ID + "-" + runId + "-initial-deposit";
     }
 
     private static <T> T waitForQuery(java.util.function.Supplier<T> query) {
@@ -316,12 +368,16 @@ class OpenInvestmentAccountWorkflowTest {
             }
             // let the final status signal arrive before completing
             Workflow.await(() -> statuses.stream()
-                    .anyMatch(s -> s.endsWith("successfully opened.") || s.endsWith("rolled back.")));
+                    .anyMatch(s -> s.equals("Complete") || s.startsWith("Rolled back")));
         }
 
+        // Records the reported states, and checks that each one says which opening it is for
         @Override
         public void updateStatus(UpdateStatusInput input) {
-            statuses.add(input.status());
+            if (!ACCOUNT_NAME.equals(input.accountName()) || input.workflowId() == null) {
+                throw new IllegalArgumentException("unexpected status update " + input);
+            }
+            statuses.add(input.state());
         }
 
         @Override
@@ -335,6 +391,9 @@ class OpenInvestmentAccountWorkflowTest {
     public interface TypeScriptActivities {
         @ActivityMethod(name = "getClient")
         WealthManagementClient getClient(String clientId);
+
+        @ActivityMethod(name = "updateClient")
+        WealthManagementClient updateClient(String clientId, Map<String, Object> fields);
 
         @ActivityMethod(name = "openInvestment")
         InvestmentAccount openInvestment(String clientId, String name, double balance);
@@ -375,6 +434,15 @@ class OpenInvestmentAccountWorkflowTest {
             calls.add("getClient:" + clientId);
             return new WealthManagementClient(clientId, "Jane", "Doe", "1 Main St", "555-0199",
                     "jane@example.com", "single");
+        }
+
+        @Override
+        public WealthManagementClient updateClient(String clientId, Map<String, Object> fields) {
+            calls.add("updateClient:" + clientId + "/" + fields);
+            WealthManagementClient c = getClient(clientId);
+            calls.remove(calls.size() - 1);
+            return new WealthManagementClient(c.clientId(), c.firstName(), c.lastName(), c.address(),
+                    (String) fields.getOrDefault("phone", c.phone()), c.email(), c.maritalStatus());
         }
 
         @Override

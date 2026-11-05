@@ -5,7 +5,6 @@ import { TemporalProvider } from '@temporalio/ai-sdk';
 import {
   proxyActivities,
   getExternalWorkflowHandle,
-  workflowInfo,
   log,
   ActivityFailure,
   ApplicationFailure,
@@ -18,9 +17,10 @@ import {
   INVEST_AGENT_NAME, INVEST_HANDOFF, INVEST_INSTRUCTIONS,
   SUPERVISOR_AGENT_NAME, SUPERVISOR_HANDOFF, SUPERVISOR_INSTRUCTIONS,
   OPEN_ACCOUNT_AGENT_NAME, OPEN_ACCOUNT_HANDOFF, OPEN_ACCOUNT_INSTRUCTIONS,
+  HANDOFF_PROMPT_PREFIX,
 } from '../../common/agent-constants';
 import { ClientContext } from '../../common/account-context';
-import { ChatInteraction, OpenInvestmentAccountInput, llmTaskQueue } from '../shared';
+import { ChatInteraction, OpenInvestmentAccountInput } from '../shared';
 import { LLM_RETRY_POLICY, TOOL_RETRY_POLICY } from '../retry-policies';
 import type * as beneficiaryActivities from '../activities/beneficiaries';
 import type * as investmentActivities from '../activities/investments';
@@ -70,6 +70,46 @@ interface AgentRunContext {
   childWorkflowId?: string;
   parentWorkflowId: string;
   traceLines: string[];
+  // Number of the customer message being processed, and the message in which each account
+  // opening's client details were shown, keyed by its workflow ID. Used to check that the customer
+  // confirmed their details before KYC is approved.
+  turn: number;
+  kycDetailsShownTurn: Record<string, number>;
+  // Latest state of each account opening in this conversation, keyed by its workflow ID. Shared
+  // with the supervisor workflow, which updates it from the status signals.
+  accountOpeningStates: Record<string, string>;
+}
+
+export const KYC_NOT_APPROVED =
+  'KYC was not approved. First show the customer their current details for this account ' +
+  'opening (get_current_client_info) and ask whether they are correct. Approve KYC only ' +
+  'after the customer confirms in their next message.';
+
+/**
+ * Why approve_kyc must not approve KYC for this account opening yet, or undefined if it may.
+ * The model sometimes treats a confirmation for an earlier account opening as approval for a new
+ * one, or approves in the same turn it showed the details. Only approve once this opening's details
+ * have been shown and the customer has replied since.
+ */
+export function kycApprovalRefusal(
+  kycDetailsShownTurn: Record<string, number>,
+  childWorkflowId: string,
+  turn: number,
+): string | undefined {
+  const shownTurn = kycDetailsShownTurn[childWorkflowId];
+  if (shownTurn === undefined || shownTurn >= turn) return KYC_NOT_APPROVED;
+  return undefined;
+}
+
+/**
+ * Agent instructions that include the client ID once it is known. The ID is otherwise only in the
+ * conversation history, and an agent that is handed the conversation often asks for it again.
+ */
+function withClientId(instructions: string): (ctx: AgentRunContext) => string {
+  return (ctx) =>
+    ctx.clientContext.clientId
+      ? `${instructions}\nThe customer's client ID is ${ctx.clientContext.clientId}. Use it, and don't ask for it again.`
+      : instructions;
 }
 
 // ---------------------------------------------------------------------------
@@ -167,6 +207,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
         const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
         const { childWorkflowId, alreadyRunning } = await startOpenAccount(workflowInput, taskQueue);
         ctx.childWorkflowId = childWorkflowId;
+        if (!alreadyRunning) ctx.accountOpeningStates[childWorkflowId] = 'Initializing';
         ctx.traceLines.push(
           `open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childWorkflowId}` +
             (alreadyRunning ? ' (already in progress)' : ''),
@@ -185,28 +226,37 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`get_current_client_info(${child_workflow_id})`);
-        return openAccountActs.getCurrentClientInfo(child_workflow_id);
+        const client = await openAccountActs.getCurrentClientInfo(child_workflow_id);
+        ctx.kycDetailsShownTurn[child_workflow_id] = ctx.turn;
+        return client;
       },
     }),
     update_client_details: tool({
-      description: 'Update the client details in the account opening workflow.',
+      description:
+        'Save corrected client details for the account opening. This also approves KYC for that account opening.',
       inputSchema: z.object({
         child_workflow_id: z.string(),
         fields: z.record(z.string(), z.string()).describe('Fields to update on the client record'),
       }),
       execute: async ({ child_workflow_id, fields }) => {
         ctx.traceLines.push(`update_client_details(${child_workflow_id})`);
-        await openAccountActs.updateClientDetails(child_workflow_id, fields);
-        return { message: 'Client details updated.' };
+        const client = await openAccountActs.updateClientDetails(child_workflow_id, fields);
+        return { message: 'Client details updated and KYC approved.', client };
       },
     }),
     approve_kyc: tool({
-      description: 'Signal that KYC verification is approved for the account opening workflow.',
+      description:
+        'Approve KYC for an account opening, after the customer confirmed their details are correct.',
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
+        const refusal = kycApprovalRefusal(ctx.kycDetailsShownTurn, child_workflow_id, ctx.turn);
+        if (refusal) {
+          ctx.traceLines.push(`approve_kyc(${child_workflow_id}) → refused: details not confirmed yet`);
+          return refusal;
+        }
         ctx.traceLines.push(`approve_kyc(${child_workflow_id})`);
         await getExternalWorkflowHandle(child_workflow_id).signal('verify_kyc');
-        return { message: 'KYC approved. Waiting for compliance review.' };
+        return 'KYC approved. The account is now waiting for compliance review.';
       },
     }),
     get_account_status: tool({
@@ -269,14 +319,12 @@ function buildAgentDefs(ctx: AgentRunContext): Record<AgentName, AgentDef> {
   return {
     supervisor: {
       name: SUPERVISOR_AGENT_NAME,
-      instructions: () => SUPERVISOR_INSTRUCTIONS,
+      instructions: withClientId(SUPERVISOR_INSTRUCTIONS),
       tools: buildHandoffTools(['beneficiary', 'investment']),
     },
     beneficiary: {
       name: BENE_AGENT_NAME,
-      instructions: (c) => c.clientContext.clientId
-        ? `${BENE_INSTRUCTIONS}\n\nThe customer's client ID is: ${c.clientContext.clientId}. Do not ask for it again.`
-        : BENE_INSTRUCTIONS,
+      instructions: withClientId(BENE_INSTRUCTIONS),
       tools: {
         ...buildBeneficiaryTools(ctx),
         ...buildHandoffTools(['supervisor']),
@@ -284,9 +332,7 @@ function buildAgentDefs(ctx: AgentRunContext): Record<AgentName, AgentDef> {
     },
     investment: {
       name: INVEST_AGENT_NAME,
-      instructions: (c) => c.clientContext.clientId
-        ? `${INVEST_INSTRUCTIONS}\n\nThe customer's client ID is: ${c.clientContext.clientId}. Do not ask for it again.`
-        : INVEST_INSTRUCTIONS,
+      instructions: withClientId(INVEST_INSTRUCTIONS),
       tools: {
         ...buildInvestmentTools(ctx),
         ...buildHandoffTools(['supervisor', 'open_account']),
@@ -294,9 +340,7 @@ function buildAgentDefs(ctx: AgentRunContext): Record<AgentName, AgentDef> {
     },
     open_account: {
       name: OPEN_ACCOUNT_AGENT_NAME,
-      instructions: (c) => c.clientContext.clientId
-        ? `${OPEN_ACCOUNT_INSTRUCTIONS}\n\nThe customer's client ID is: ${c.clientContext.clientId}. Do not ask for it again.`
-        : OPEN_ACCOUNT_INSTRUCTIONS,
+      instructions: withClientId(OPEN_ACCOUNT_INSTRUCTIONS),
       tools: {
         ...buildOpenAccountTools(ctx),
         ...buildHandoffTools(['investment']),
@@ -328,6 +372,7 @@ async function runAgentLoop(
   startAgent: AgentName,
   messages: ModelMessage[],
   ctx: AgentRunContext,
+  llmTaskQueue: string,
 ): Promise<{ text: string; messages: ModelMessage[]; activeAgent: AgentName }> {
   let currentAgent = startAgent;
   let currentMessages = messages;
@@ -335,7 +380,7 @@ async function runAgentLoop(
   // Model calls run as activities on their own task queue (see worker.ts), retried until the model recovers
   const provider = new TemporalProvider({
     languageModel: {
-      taskQueue: llmTaskQueue(workflowInfo().taskQueue),
+      taskQueue: llmTaskQueue,
       startToCloseTimeout: '2 minutes',
       retry: LLM_RETRY_POLICY,
     },
@@ -348,7 +393,7 @@ async function runAgentLoop(
 
     const result = await generateText({
       model: provider.languageModel('gemini-2.5-pro'),
-      system: def.instructions(ctx),
+      system: HANDOFF_PROMPT_PREFIX + def.instructions(ctx),
       messages: currentMessages,
       tools: def.tools as any,
       stopWhen: HANDOFF_STOP_CONDITIONS,
@@ -394,6 +439,13 @@ export interface RunAgentTurnInput {
   clientId?: string;
   childWorkflowId?: string;
   activeAgent?: AgentName;
+  // Number of this customer message in the conversation (1 for the first)
+  turn: number;
+  kycDetailsShownTurn: Record<string, number>;
+  // Task queue for the model calls (see getLlmTaskQueue)
+  llmTaskQueue: string;
+  // The supervisor's account opening states; a newly started opening is added to it
+  accountOpeningStates: Record<string, string>;
 }
 
 export interface RunAgentTurnOutput {
@@ -402,10 +454,11 @@ export interface RunAgentTurnOutput {
   clientId?: string;
   childWorkflowId?: string;
   activeAgent: AgentName;
+  kycDetailsShownTurn: Record<string, number>;
 }
 
 export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnOutput> {
-  const { workflowId, userInput, messages, clientId, childWorkflowId, activeAgent } = input;
+  const { workflowId, userInput, messages, clientId, childWorkflowId, activeAgent, turn, llmTaskQueue } = input;
 
   const clientContext: ClientContext = { clientId, childWorkflowId };
   const ctx: AgentRunContext = {
@@ -413,6 +466,9 @@ export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTu
     childWorkflowId,
     parentWorkflowId: workflowId,
     traceLines: [],
+    turn,
+    kycDetailsShownTurn: { ...input.kycDetailsShownTurn },
+    accountOpeningStates: input.accountOpeningStates,
   };
 
   const updatedMessages: ModelMessage[] = [
@@ -421,7 +477,7 @@ export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTu
   ];
 
   const { text, messages: finalMessages, activeAgent: nextAgent } =
-    await runAgentLoop(activeAgent ?? 'supervisor', updatedMessages, ctx);
+    await runAgentLoop(activeAgent ?? 'supervisor', updatedMessages, ctx, llmTaskQueue);
 
   const interaction: ChatInteraction = {
     user_prompt: userInput,
@@ -435,5 +491,6 @@ export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTu
     clientId: ctx.clientContext.clientId,
     childWorkflowId: ctx.childWorkflowId,
     activeAgent: nextAgent,
+    kycDetailsShownTurn: ctx.kycDetailsShownTurn,
   };
 }
