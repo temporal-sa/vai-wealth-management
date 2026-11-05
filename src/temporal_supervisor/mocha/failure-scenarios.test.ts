@@ -159,6 +159,33 @@ describe('failure scenarios', function () {
     });
   });
 
+  it('opens the account without a parent workflow to report to', async () => {
+    // As run_open_account_workflow.ts starts it: no chat, so no status updates to send
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: TASK_QUEUE,
+      workflowsPath: require.resolve('./test-workflows'),
+      activities: fakeActivities([]),
+    });
+    await worker.runUntil(async () => {
+      const input: OpenInvestmentAccountInput = {
+        client_id: CLIENT_ID,
+        account_name: 'College Fund',
+        initial_amount: 1000,
+        parent_workflow_id: '',
+      };
+      const child = await env.client.workflow.start(OpenInvestmentAccountWorkflow, {
+        taskQueue: TASK_QUEUE,
+        workflowId: `open-account-no-parent-${Math.random().toString(36).slice(2)}`,
+        args: [input],
+      });
+      await child.signal('verify_kyc');
+      await child.signal('compliance_approved');
+      assert.deepStrictEqual(await child.result(), { account_created: true, message: 'investment account created' });
+      assert.strictEqual(await child.query('get_current_state'), 'Complete');
+    });
+  });
+
   it('rolls back completed steps in reverse order when the custodian rejects the account', async () => {
     const calls: string[] = [];
     await runOpenAccount(fakeActivities(calls, { registerAccount: 'reject' }), null, async (child, parent) => {

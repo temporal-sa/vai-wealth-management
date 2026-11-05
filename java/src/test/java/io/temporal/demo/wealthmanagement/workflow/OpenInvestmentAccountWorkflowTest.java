@@ -107,6 +107,21 @@ class OpenInvestmentAccountWorkflowTest {
         assertEquals("Complete", child.getCurrentState());
     }
 
+    // As run_open_account_workflow.ts starts it: no chat, so no status updates to send
+    @Test
+    void opensAccountWithoutAParentWorkflow() {
+        OpenInvestmentAccountWorkflow child = client.newWorkflowStub(OpenInvestmentAccountWorkflow.class,
+                WorkflowOptions.newBuilder().setWorkflowId(CHILD_ID).setTaskQueue(OPEN_ACCOUNT_QUEUE).build());
+        WorkflowClient.start(child::run, new OpenInvestmentAccountInput(CLIENT_ID, ACCOUNT_NAME, 1000.0, "", null));
+
+        child.verifyKyc();
+        child.complianceApproved();
+        OpenInvestmentAccountOutput result = WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
+
+        assertTrue(result.accountCreated());
+        assertEquals("Complete", child.getCurrentState());
+    }
+
     @Test
     void updateClientDetailsSavesTheDetailsAndApprovesKyc() {
         startParent();

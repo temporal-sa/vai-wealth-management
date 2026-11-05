@@ -53,6 +53,8 @@ export interface OpenInvestmentAccountInput {
   client_id: string;
   account_name: string;
   initial_amount: number;
+  // The chat (supervisor) workflow that receives the status updates. Empty when the workflow is
+  // started on its own, as run_open_account_workflow.ts does; the status updates are then skipped.
   parent_workflow_id: string;
   // Set when a promotion is running for the new account (e.g. "WELCOME-BONUS")
   promo_code?: string | null;

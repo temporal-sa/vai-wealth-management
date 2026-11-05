@@ -240,6 +240,41 @@ Because the ID comes from the chat and the account name, only one opening per ac
 a chat: if the agent asks to open the same account again, it continues the opening already in progress. Once
 that opening finishes (opened or rolled back), the same name can be opened again.
 
+### Testing the open-account workflow on its own
+
+`startlocalopenaccount.sh` exercises `OpenInvestmentAccountWorkflow` without the chat, the API, the UX or the
+LLM (no Gemini key needed). It starts a TypeScript worker in the background, runs
+`run_open_account_workflow.ts` (`npm run open-account.scenarios`), and stops the worker when it finishes. The
+script runs three scenarios for client `123`, each starting the workflow directly and printing every state
+it reports (from the `get_current_state` query) and the result:
+
+1. KYC approved (`verify_kyc` signal), then compliance approved.
+2. Client details read (`get_client_details` update) and changed (`update_client_details` update, which also
+   completes KYC: client 123's last name becomes "Doenut"), then compliance approved.
+3. KYC approved, then the workflow waits in `Waiting Compliance Review` until you send the approval yourself.
+   The script prints the command to run from the project root, for example
+   `src/temporal_supervisor/localsendcomplianceapproval.sh OpenAccount-standalone-<run>-123-vacation3`.
+
+Temporal must be running (and Redis, as for the demo). The script can be run from any directory:
+
+```shell
+src/temporal_supervisor/startlocalopenaccount.sh
+```
+
+With a task queue name, the workflow runs on that queue, so you can run the same scenarios against the Java
+workflow (start `java/startlocalworker.sh <queue>` first):
+
+```shell
+src/temporal_supervisor/startlocalopenaccount.sh OpenAccount
+```
+
+Further arguments go to `run_open_account_workflow.ts`: `--scenario N` (repeatable) runs only some scenarios,
+and `--amount X` sets the initial deposit, e.g. `--scenario 1 --amount 300000` to see the saga roll back
+(client 123's linked bank account has $250,000). Each run uses new workflow IDs
+(`OpenAccount-standalone-<run>-123-<account>`). There is no chat workflow, so the workflow has no parent and
+skips its status updates. Like the demo, the scenarios change `data/*.json` (a new account, the linked bank
+account balance, client 123's last name); reset them with `git checkout data/` (see below).
+
 ### Resetting the demo data
 
 Opening and closing accounts, editing client details during KYC and adding or deleting beneficiaries change
