@@ -16,7 +16,7 @@ import { useClaimCheck } from '../../common/data-converter';
 import { workflowsModule } from '../worker-workflows';
 import { openAccountWorkflowId } from '../workflows/start-open-account';
 import type { OpenInvestmentAccountInput, OpenInvestmentAccountOutput, WealthManagementClient } from '../shared';
-import { OpenInvestmentAccountWorkflow, StartOpenAccountTwiceWorkflow, TestParentWorkflow } from './test-workflows';
+import { OpenInvestmentAccountWorkflow, StartOpenAccountRepeatedlyWorkflow, TestParentWorkflow } from './test-workflows';
 
 const TASK_QUEUE = 'failure-scenarios-test';
 const CLIENT_ID = '123';
@@ -79,8 +79,7 @@ function fakeActivities(calls: string[], failures: Record<string, 'reject' | num
   };
 }
 
-// The idempotency key of the initial deposit: unique per run, since the workflow ID is reused when
-// the same account is opened again in a chat
+// The idempotency key of the initial deposit: unique per run, even if a workflow ID is used again
 async function initialDepositId(child: WorkflowHandle): Promise<string> {
   const { runId } = await child.describe();
   return `${child.workflowId}-${runId}-initial-deposit`;
@@ -276,7 +275,7 @@ describe('failure scenarios', function () {
     });
   });
 
-  it('moves money again when the same account is reopened after a rollback', async () => {
+  it('moves money again when a workflow ID is used again after a rollback', async () => {
     const childWorkflowId = `open-account-reopen-${Math.random().toString(36).slice(2)}`;
     const first: string[] = [];
     await runOpenAccount(fakeActivities(first, { registerAccount: 'reject' }), null, (child) => child.result(), childWorkflowId);
@@ -366,7 +365,7 @@ describe('failure scenarios', function () {
     });
   });
 
-  it('starts one Open Account workflow per account in a chat, however often the tool is called', async () => {
+  it('starts a new Open Account workflow each time the same account is opened in a chat', async () => {
     const worker = await Worker.create({
       connection: env.nativeConnection,
       taskQueue: TASK_QUEUE,
@@ -375,37 +374,38 @@ describe('failure scenarios', function () {
     });
     await worker.runUntil(async () => {
       const accountName = `Car ${Math.random().toString(36).slice(2)}`;
-      const parentWorkflowId = `start-twice-${Math.random().toString(36).slice(2)}`;
-      const childWorkflowId = openAccountWorkflowId(parentWorkflowId, CLIENT_ID, accountName);
-      const start = (times: number) =>
-        env.client.workflow.execute(StartOpenAccountTwiceWorkflow, {
-          taskQueue: TASK_QUEUE,
-          workflowId: parentWorkflowId,
-          args: [
-            { client_id: CLIENT_ID, account_name: accountName, initial_amount: 1000, parent_workflow_id: parentWorkflowId, promo_code: null },
-            times,
-          ],
-        });
+      const parentWorkflowId = `start-repeatedly-${Math.random().toString(36).slice(2)}`;
+      const childWorkflowIds = await env.client.workflow.execute(StartOpenAccountRepeatedlyWorkflow, {
+        taskQueue: TASK_QUEUE,
+        workflowId: parentWorkflowId,
+        args: [
+          { client_id: CLIENT_ID, account_name: accountName, initial_amount: 1000, parent_workflow_id: parentWorkflowId, promo_code: null },
+          2,
+        ],
+      });
 
-      assert.deepStrictEqual(await start(2), [
-        { childWorkflowId, alreadyRunning: false },
-        { childWorkflowId, alreadyRunning: true },
+      assert.deepStrictEqual(childWorkflowIds, [
+        openAccountWorkflowId(parentWorkflowId, CLIENT_ID, accountName, 1),
+        openAccountWorkflowId(parentWorkflowId, CLIENT_ID, accountName, 2),
       ]);
-
-      // The child is terminated with its parent; after that the same chat can open the account again
-      const child = env.client.workflow.getHandle(childWorkflowId);
-      while ((await child.describe()).status.name === 'RUNNING') {
-        await new Promise((resolve) => setTimeout(resolve, 100));
+      // Both were started (and terminated with their parent): two openings, not one
+      for (const childWorkflowId of childWorkflowIds) {
+        const { type } = await env.client.workflow.getHandle(childWorkflowId).describe();
+        assert.strictEqual(type, 'OpenInvestmentAccountWorkflow');
       }
-      assert.deepStrictEqual(await start(1), [{ childWorkflowId, alreadyRunning: false }]);
     });
   });
 
-  it('derives the workflow ID from the chat, client and account name', () => {
+  it('derives the workflow ID from the chat, client, account name and opening number', () => {
     // The account name as given, like the reference implementation
-    assert.strictEqual(openAccountWorkflowId('chat-1', '123', 'Kids College Fund'), 'OpenAccount-chat-1-123-Kids College Fund');
+    assert.strictEqual(
+      openAccountWorkflowId('chat-1', '123', 'Kids College Fund', 1),
+      'OpenAccount-chat-1-123-Kids College Fund-1',
+    );
+    // Opening the same account again in a chat starts a new workflow
+    assert.notStrictEqual(openAccountWorkflowId('chat-1', '123', 'Car', 1), openAccountWorkflowId('chat-1', '123', 'Car', 2));
     // Two chats for the same client and account name don't collide
-    assert.notStrictEqual(openAccountWorkflowId('chat-1', '123', 'Car'), openAccountWorkflowId('chat-2', '123', 'Car'));
+    assert.notStrictEqual(openAccountWorkflowId('chat-1', '123', 'Car', 1), openAccountWorkflowId('chat-2', '123', 'Car', 1));
   });
 });
 

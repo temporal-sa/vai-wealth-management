@@ -227,14 +227,15 @@ cd src/temporal_supervisor
 ./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
-The child workflow ID is `OpenAccount-<chat workflow ID>-<client ID>-<account name>`, with the account name
-exactly as the customer gave it. Each chat in the UX gets a random workflow ID starting with
-`vai-temporal-agent-`, so opening "College Fund" for client 123 gives something like
-`OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund`. Account names can contain spaces, so put the ID
-in quotes:
+The child workflow ID is `OpenAccount-<chat workflow ID>-<client ID>-<account name>-<n>`, with the account
+name exactly as the customer gave it and `<n>` the number of account openings started in the chat so far,
+this one included (1, 2, 3, ...). Each chat in the UX gets a random workflow ID starting with
+`vai-temporal-agent-`, so opening "College Fund" for client 123 as the chat's first opening gives something
+like `OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund-1`. Account names can contain spaces, so put
+the ID in quotes:
 
 ```shell
-./localsendcomplianceapproval.sh "OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund"
+./localsendcomplianceapproval.sh "OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund-1"
 ```
 
 The UX doesn't show this ID (it logs the chat's workflow ID in the browser console). To find it, open the [Temporal UI](http://localhost:8233) and look for the
@@ -244,9 +245,11 @@ running `OpenInvestmentAccountWorkflow` (it is a child of the chat's `WealthMana
 temporal workflow list --query "WorkflowType='OpenInvestmentAccountWorkflow' AND ExecutionStatus='Running'"
 ```
 
-Because the ID comes from the chat and the account name, only one opening per account name runs at a time in
-a chat: if the agent asks to open the same account again, it continues the opening already in progress. Once
-that opening finishes (opened or rolled back), the same name can be opened again.
+Every request to open an account starts a new account opening (a new child workflow) with its own KYC, even if
+an account with the same name was opened, or is still being opened, earlier in the chat. Opening "Vacation"
+twice gives two workflows, `...-123-Vacation-1` and `...-123-Vacation-2`, which can both be pending at once; the
+customer confirms their details for each, and each needs its own compliance approval. If more than one is
+running, the list above shows them all: pick the one whose ID ends with the number you want.
 
 ### Testing the open-account workflow on its own
 
@@ -410,7 +413,8 @@ npm test
 The tests run the workflows against a local Temporal test server, which is downloaded automatically on the
 first run, with stub activities and a scripted model (no Redis, Gemini key or worker needed). They cover the
 saga (happy path, rollback in reverse order, undoing only completed steps, transient retries), the promo-code
-bug pausing the workflow, starting only one opening per account, the KYC approval check, the business rules,
+bug pausing the workflow, a new opening (with its own KYC) each time the same account is opened, the KYC
+approval check, the business rules,
 idempotent transfers, the 429 handling, and the agent instructions (off-topic handling).
 
 The other test suites:
@@ -426,7 +430,7 @@ cd java
 ./gradlew test
 ```
 
-#### Live agent handoff test
+#### Live agent tests
 
 `npm test` uses a scripted model, so it can't check what the model decides to do. The live test runs the real
 chat workflow against Gemini: the customer asks about beneficiaries, gives client ID 123, then asks what
@@ -440,7 +444,14 @@ npm run test:live
 LIVE_TEST_RUNS=10 npm run test:live   # repeat the conversation, since model output varies
 ```
 
-Redis is optional for this test (without it, the chaos flags read as off).
+The second live test, `repeat-opening.live.ts`, runs the conversation "Who are my beneficiaries?", "123", "what
+investments do I have?", "Open Vacation with $13,000", "Yes", "Open Vacation with $13,000". The replies to
+both "Open Vacation" messages must show the client's details for KYC (Don, 123 Main Street), and two
+Open Account workflows must be started, ending `-Vacation-1` and `-Vacation-2`. It stubs the activities that
+would write `data/*.json`, use Redis or connect to another Temporal server.
+
+Redis is optional for the handoff test (without it, the chaos flags read as off); the repeat-opening test
+doesn't use it.
 
 ## Running the demo in Temporal Cloud
 

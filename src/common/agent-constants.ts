@@ -57,7 +57,10 @@ If the customer asks a question that is not related to the routine, transfer bac
 // Temporal version: opening an account is the Open Account Agent's job (a child workflow with KYC and
 // compliance review), reached with the handoff_to_open_account_agent tool.
 export const INVEST_INSTRUCTIONS = investInstructions(
-  'If they wish to open a new account, hand off to the Open Account Agent with the handoff_to_open_account_agent tool.',
+  'If they wish to open a new account, hand off to the Open Account Agent with the handoff_to_open_account_agent tool.\n' +
+    '   Every request to open an account starts a new account opening: hand off to the Open Account Agent each time, ' +
+    'even if an account with the same name was opened, or is still being opened, earlier in this conversation. ' +
+    "Don't ask the customer whether they want another one. Never answer a request to open an account from the conversation history.",
 );
 
 // Standalone version (src/vai_supervisor): there is no Open Account Agent; the Investment Agent opens
@@ -89,6 +92,7 @@ An account opening is finished when its status is "Complete" (the account was op
 # Routine
 1. If you don't have a client ID, ask for one.
 2. Use the open_new_investment_account tool to begin the process.
+   Every request to open an account starts a new account opening: call open_new_investment_account each time, even if an account with the same name was opened, or is still being opened, earlier in this conversation. Don't ask the customer whether they want another one. Never answer a request to open an account from the conversation history.
    If the tool requires additional information, ask the user for the required data.
    Save the returned child_workflow_id — you will need it for subsequent tool calls.
    If the tool says the account cannot be opened, explain the reason to the customer and do not continue.

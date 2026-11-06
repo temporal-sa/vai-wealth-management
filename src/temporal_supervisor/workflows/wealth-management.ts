@@ -61,6 +61,9 @@ export async function WealthManagementWorkflow(): Promise<void> {
   let kycDetailsShownTurn: Record<string, number> = {};
   // Latest state of each account opening started in this conversation, keyed by its workflow ID
   const accountOpeningStates: Record<string, string> = {};
+  // Number of account openings started in this conversation: each one gets the next number in its
+  // workflow ID, so every request to open an account starts a new opening, even for the same name
+  let accountOpeningsStarted = 0;
   let llmTaskQueue: string | undefined;
 
   setHandler(processUserMessageSignal, (msg: ProcessUserMessageInput) => {
@@ -114,6 +117,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
         kycDetailsShownTurn,
         llmTaskQueue,
         accountOpeningStates,
+        accountOpeningsStarted,
       });
 
       messages = result.messages;
@@ -121,6 +125,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
       childWorkflowId = result.childWorkflowId;
       activeAgent = result.activeAgent;
       kycDetailsShownTurn = result.kycDetailsShownTurn;
+      accountOpeningsStarted = result.accountOpeningsStarted;
       log.info('Agent turn complete', { clientId: result.clientId, agentTrace: result.interaction.agent_trace });
 
       await appendChatInteraction(workflowId, result.interaction);
@@ -136,8 +141,8 @@ export async function WealthManagementWorkflow(): Promise<void> {
     //   - Wait for allHandlersFinished() and drain the pending message and
     //     status queues first, so no customer message or status update is lost.
     //   - Carry the conversation state into the new run: the message history, the
-    //     active agent, the client ID, the account-opening states, and the KYC
-    //     guard's turn tracking.
+    //     active agent, the client ID, the account-opening states, the number of
+    //     account openings started, and the KYC guard's turn tracking.
     //   - Open-account child workflows are started with ParentClosePolicy.TERMINATE,
     //     which also applies when the parent continues-as-new, so an opening waiting
     //     for KYC or compliance would be terminated. Use ParentClosePolicy.ABANDON and

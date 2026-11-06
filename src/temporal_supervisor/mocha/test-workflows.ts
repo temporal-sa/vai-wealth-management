@@ -22,15 +22,16 @@ export async function TestParentWorkflow(): Promise<string[]> {
   return statuses;
 }
 
-// Starts the same Open Account workflow `times` times, as a model repeating its tool call would.
-// The children are terminated when this workflow returns.
-export async function StartOpenAccountTwiceWorkflow(
+// Starts an Open Account workflow for the same account `times` times, as a customer asking to open
+// it again would: each one is a new opening with the next number. The children are terminated when
+// this workflow returns.
+export async function StartOpenAccountRepeatedlyWorkflow(
   input: OpenInvestmentAccountInput,
   times: number,
-): Promise<{ childWorkflowId: string; alreadyRunning: boolean }[]> {
-  const results = [];
-  for (let i = 0; i < times; i++) {
-    results.push(await startOpenAccount(input));
+): Promise<string[]> {
+  const childWorkflowIds = [];
+  for (let openingNumber = 1; openingNumber <= times; openingNumber++) {
+    childWorkflowIds.push(await startOpenAccount(input, openingNumber));
   }
-  return results;
+  return childWorkflowIds;
 }

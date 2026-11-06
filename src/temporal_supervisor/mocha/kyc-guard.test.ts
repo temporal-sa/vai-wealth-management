@@ -18,10 +18,11 @@ import type {
   ProviderV3,
 } from '@ai-sdk/provider';
 import { KYC_NOT_APPROVED, kycApprovalRefusal } from '../workflows/agent-loop';
+import { validateNewAccount } from '../activities/investments';
 import type { ChatInteraction, WealthManagementClient } from '../shared';
 import { KycRecorderWorkflow, kycApprovedQuery, WealthManagementWorkflow } from './kyc-guard-workflows';
 
-const OPENING = 'OpenAccount-chat-123-education';
+const OPENING = 'OpenAccount-chat-123-education-2';
 
 describe('KYC guard', function () {
   it('refuses when the details were never shown for this opening', () => {
@@ -29,7 +30,7 @@ describe('KYC guard', function () {
   });
 
   it('refuses when the details were only shown for an earlier opening', () => {
-    assert.strictEqual(kycApprovalRefusal({ 'OpenAccount-chat-123-car': 2 }, OPENING, 3), KYC_NOT_APPROVED);
+    assert.strictEqual(kycApprovalRefusal({ 'OpenAccount-chat-123-car-1': 2 }, OPENING, 3), KYC_NOT_APPROVED);
   });
 
   it("refuses in the turn the details were shown, before the customer replied", () => {
@@ -121,8 +122,8 @@ describe('KYC guard in the supervisor workflow', function () {
 
   it('approves KYC only after the customer replies to their details for that opening', async () => {
     const suffix = Math.random().toString(36).slice(2);
-    const car = `OpenAccount-kyc-${suffix}-123-car`;
-    const vacation = `OpenAccount-kyc-${suffix}-123-vacation`;
+    const car = `OpenAccount-kyc-${suffix}-123-car-1`;
+    const vacation = `OpenAccount-kyc-${suffix}-123-vacation-2`;
     const script: Step[] = [
       // Customer asks to open Car. The model shows their details, then approves KYC in the same
       // turn without waiting for the customer to answer.
@@ -248,8 +249,8 @@ describe('account opening status in the supervisor workflow', function () {
   it('reports the latest state of an opening, and says when there is no such opening', async () => {
     const suffix = Math.random().toString(36).slice(2);
     const chatId = `account-opening-status-${suffix}`;
-    const opening = `OpenAccount-${chatId}-123-College Fund`;
-    const mistyped = `OpenAccount-${chatId}-123-College Fun`;
+    const opening = `OpenAccount-${chatId}-123-College Fund-1`;
+    const mistyped = `OpenAccount-${chatId}-123-College Fun-1`;
     const script: Step[] = [
       tool('handoff_to_investment_agent', { client_id: '123' }),
       tool('handoff_to_open_account_agent'),
@@ -320,6 +321,153 @@ describe('account opening status in the supervisor workflow', function () {
         'appendChatInteraction',
         `deleteConversation:${chatId}`,
       ]);
+    });
+  });
+});
+
+// Every request to open an account starts a new account opening (a new Open Account workflow) with
+// its own KYC, even when an opening with the same name is still in progress. Runs the real supervisor
+// and Open Account workflows with a scripted model; the activities are stand-ins (no data files).
+describe('opening the same account twice in a conversation', function () {
+  this.timeout(120_000);
+  const TASK_QUEUE = 'repeat-opening-test';
+  let env: TestWorkflowEnvironment;
+
+  before(async () => {
+    env = await TestWorkflowEnvironment.createLocal();
+  });
+
+  after(async () => {
+    await env?.teardown();
+  });
+
+  it('starts a second Vacation opening that needs its own KYC', async () => {
+    const chatId = `repeat-opening-${Math.random().toString(36).slice(2)}`;
+    const first = `OpenAccount-${chatId}-123-Vacation-1`;
+    const second = `OpenAccount-${chatId}-123-Vacation-2`;
+    const open = (initial_amount: number) =>
+      tool('open_new_investment_account', { client_id: '123', account_name: 'Vacation', initial_amount });
+    const script: Step[] = [
+      // "Open Vacation with $13,000"
+      tool('handoff_to_investment_agent', { client_id: '123' }),
+      tool('handoff_to_open_account_agent'),
+      open(13000),
+      tool('get_current_client_info', { child_workflow_id: first }),
+      message('Are these details correct?'),
+      // "Yes"
+      tool('approve_kyc', { child_workflow_id: first }),
+      message('Your account is waiting for compliance review.'),
+      // "Open Vacation with $13,000". A refused opening doesn't use up a number. The model then
+      // treats the earlier confirmation as approval for the new opening.
+      open(50),
+      open(13000),
+      tool('approve_kyc', { child_workflow_id: second }),
+      tool('get_current_client_info', { child_workflow_id: second }),
+      message('Are these details still correct?'),
+      // "Yes"
+      tool('approve_kyc', { child_workflow_id: second }),
+      message('Your account is waiting for compliance review.'),
+    ];
+    const toolResults: Array<{ toolName: string; output: string }> = [];
+    const interactions: ChatInteraction[] = [];
+    const client: WealthManagementClient = {
+      client_id: '123', first_name: 'Sam', last_name: 'Doe', address: '1 Main St',
+      phone: '555', email: 's@example.com', marital_status: 'single',
+    };
+
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: TASK_QUEUE,
+      workflowsPath: require.resolve('./kyc-guard-workflows'),
+      plugins: [new AiSdkPlugin({ modelProvider: scriptedProvider(script, toolResults) })],
+      bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
+      activities: {
+        validateNewAccount,
+        async findPromotion() {
+          return null;
+        },
+        async getOpenAccountTaskQueue() {
+          return null; // the Open Account workflows run on this worker
+        },
+        async getLlmTaskQueue() {
+          return TASK_QUEUE;
+        },
+        async getClient() {
+          return client;
+        },
+        async getCurrentClientInfo(childWorkflowId: string) {
+          return env.client.workflow.getHandle(childWorkflowId).executeUpdate('get_client_details');
+        },
+        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+          interactions.push(interaction);
+          return interactions.length;
+        },
+        async appendStatusUpdate() {
+          return 0;
+        },
+        async deleteConversation() {
+          return true;
+        },
+      },
+    });
+
+    await worker.runUntil(async () => {
+      const chat = await env.client.workflow.start(WealthManagementWorkflow, {
+        taskQueue: TASK_QUEUE,
+        workflowId: chatId,
+        args: [],
+      });
+      // Sends a customer message and returns the tool results of that turn
+      const send = async (text: string): Promise<Array<{ toolName: string; output: string }>> => {
+        const before = interactions.length;
+        const resultsBefore = toolResults.length;
+        await chat.signal('process_user_message', { user_input: text });
+        while (interactions.length === before) await new Promise((r) => setTimeout(r, 50));
+        return toolResults.slice(resultsBefore);
+      };
+      const outputs = (results: Array<{ toolName: string; output: string }>, toolName: string) =>
+        results.filter((r) => r.toolName === toolName).map((r) => r.output);
+      // Waits for an opening to reach a state, and returns the state it is in
+      const stateOf = async (workflowId: string, expected: string): Promise<string> => {
+        let state = '';
+        for (let i = 0; i < 100 && state !== expected; i++) {
+          state = await env.client.workflow.getHandle(workflowId).query<string>('get_current_state');
+          if (state !== expected) await new Promise((r) => setTimeout(r, 50));
+        }
+        return state;
+      };
+
+      let results = await send('Open Vacation with $13,000');
+      assert.match(outputs(results, 'open_new_investment_account')[0], new RegExp(`"child_workflow_id":"${first}"`));
+      assert.match(outputs(results, 'get_current_client_info')[0], /Sam/);
+
+      results = await send('Yes');
+      assert.match(outputs(results, 'approve_kyc')[0], /KYC approved/);
+      assert.strictEqual(await stateOf(first, 'Waiting Compliance Review'), 'Waiting Compliance Review');
+
+      results = await send('Open Vacation with $13,000');
+      const opened = outputs(results, 'open_new_investment_account');
+      assert.match(opened[0], /cannot be opened/);
+      assert.match(opened[1], new RegExp(`"child_workflow_id":"${second}"`));
+      // The confirmation for the first opening doesn't count for the second
+      assert.match(outputs(results, 'approve_kyc')[0], /KYC was not approved/);
+      assert.strictEqual(await stateOf(second, 'Waiting KYC'), 'Waiting KYC');
+      assert.match(outputs(results, 'get_current_client_info')[0], /Sam/);
+
+      results = await send('Yes');
+      assert.match(outputs(results, 'approve_kyc')[0], /KYC approved/);
+      assert.strictEqual(await stateOf(second, 'Waiting Compliance Review'), 'Waiting Compliance Review');
+
+      // Both openings are running at the same time
+      for (const workflowId of [first, second]) {
+        const { status, type } = await env.client.workflow.getHandle(workflowId).describe();
+        assert.strictEqual(type, 'OpenInvestmentAccountWorkflow');
+        assert.strictEqual(status.name, 'RUNNING');
+      }
+      assert.deepStrictEqual(script, []);
+
+      await chat.signal('end_workflow');
+      await chat.result();
     });
   });
 });

@@ -138,7 +138,7 @@ class OpenInvestmentAccountWorkflowTest {
     }
 
     @Test
-    void reopeningAfterRollbackUsesANewTransferId() {
+    void reusedWorkflowIdAfterRollbackUsesANewTransferId() {
         tsActivities.failures.put("registerAccount", "reject");
         OpenInvestmentAccountWorkflow first = startAndApprove(null);
         WorkflowStub.fromTyped(first).getResult(OpenInvestmentAccountOutput.class);
@@ -147,7 +147,7 @@ class OpenInvestmentAccountWorkflowTest {
         // The parent closes after the final status signal; wait for it so its ID can be reused
         client.newUntypedWorkflowStub(PARENT_ID).getResult(Void.class);
 
-        // Same parent and child workflow IDs, as when the customer opens the same account again in a chat
+        // Same parent and child workflow IDs: the run ID still gives the deposit a new transfer ID
         OpenInvestmentAccountOutput result = runToCompletion(null);
 
         assertTrue(result.accountCreated());

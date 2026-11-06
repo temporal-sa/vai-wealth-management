@@ -144,10 +144,10 @@ export async function OpenInvestmentAccountWorkflow(
 
   // Step 4: Create, fund and register the investment account
   const bonus = promo_code ? welcomeBonus(promo_code, initial_amount) : 0;
-  // Idempotency key: stable across activity retries and worker restarts. It includes the run ID
-  // because the workflow ID is reused when the customer opens an account with the same name again
-  // in the same chat (e.g. after a rollback), and a reused key would return the earlier transfer
-  // without moving any money.
+  // Idempotency key: stable across activity retries and worker restarts. The chat gives every
+  // account opening its own workflow ID; the run ID keeps the key unique even if a workflow ID is
+  // ever used again (e.g. a workflow started on its own with an earlier ID), since a reused key
+  // would return the earlier transfer without moving any money.
   const transferId = `${workflowInfo().workflowId}-${workflowInfo().runId}-initial-deposit`;
 
   // Saga: each completed step registers how to undo it. If a later step fails with a
