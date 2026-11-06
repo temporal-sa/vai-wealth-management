@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { APICallError } from 'ai';
-import { TestWorkflowEnvironment } from '@temporalio/testing';
+import { MockActivityEnvironment, TestWorkflowEnvironment } from '@temporalio/testing';
 import { Worker } from '@temporalio/worker';
 import { activityInfo } from '@temporalio/activity';
 import { ApplicationFailure } from '@temporalio/common';
@@ -11,8 +11,9 @@ import type { WorkflowHandle } from '@temporalio/client';
 import { temporal } from '@temporalio/proto';
 import { FundingManager, InsufficientFundsError } from '../../common/funding-manager';
 import { translateModelError } from '../chaos-model';
-import { validateNewAccount } from '../activities/investments';
-import { InvestmentManager } from '../../common/investment-manager';
+import { removeInvestment, validateNewAccount } from '../activities/investments';
+import { useClaimCheck } from '../../common/data-converter';
+import { workflowsModule } from '../worker-workflows';
 import { openAccountWorkflowId } from '../workflows/start-open-account';
 import type { OpenInvestmentAccountInput, OpenInvestmentAccountOutput, WealthManagementClient } from '../shared';
 import { OpenInvestmentAccountWorkflow, StartOpenAccountTwiceWorkflow, TestParentWorkflow } from './test-workflows';
@@ -45,6 +46,7 @@ function fakeActivities(calls: string[], failures: Record<string, 'reject' | num
   }
   return {
     async getClient() {
+      maybeFail('getClient');
       return CLIENT;
     },
     async updateClient(_clientId: string, fields: Partial<WealthManagementClient>) {
@@ -56,8 +58,8 @@ function fakeActivities(calls: string[], failures: Record<string, 'reject' | num
       calls.push(`openInvestment:${name}/${balance}`);
       return { investment_id: INVESTMENT_ID, name, balance };
     },
-    async closeInvestment(_clientId: string, investmentId: string) {
-      calls.push(`closeInvestment:${investmentId}`);
+    async removeInvestment(_clientId: string, investmentId: string) {
+      calls.push(`removeInvestment:${investmentId}`);
       return true;
     },
     async debitLinkedAccount(_clientId: string, amount: number, transferId: string) {
@@ -200,7 +202,7 @@ describe('failure scenarios', function () {
         `debit:1000/${transferId}`,
         `register:${INVESTMENT_ID}`,
         `credit:1000/${transferId}-refund`,
-        `closeInvestment:${INVESTMENT_ID}`,
+        `removeInvestment:${INVESTMENT_ID}`,
       ]);
       assert.strictEqual(
         await child.query('get_current_state'),
@@ -225,7 +227,38 @@ describe('failure scenarios', function () {
       assert.deepStrictEqual(calls, [
         'openInvestment:College Fund/1000',
         `debit:1000/${await initialDepositId(child)}`,
-        `closeInvestment:${INVESTMENT_ID}`,
+        `removeInvestment:${INVESTMENT_ID}`,
+      ]);
+    });
+  });
+
+  it('applies approvals sent while the client is still loading once the workflow gets there', async () => {
+    const calls: string[] = [];
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: TASK_QUEUE,
+      workflowsPath: require.resolve('./test-workflows'),
+      activities: fakeActivities(calls, { getClient: 2 }),
+    });
+    await worker.runUntil(async () => {
+      const suffix = Math.random().toString(36).slice(2);
+      const parent = await env.client.workflow.start(TestParentWorkflow, { taskQueue: TASK_QUEUE, workflowId: `parent-${suffix}` });
+      const child = await env.client.workflow.start(OpenInvestmentAccountWorkflow, {
+        taskQueue: TASK_QUEUE,
+        workflowId: `open-account-${suffix}`,
+        args: [{ client_id: CLIENT_ID, account_name: 'College Fund', initial_amount: 1000, parent_workflow_id: parent.workflowId }],
+      });
+      // Both arrive while getClient is being retried, compliance first
+      await child.signal('compliance_approved');
+      await child.signal('verify_kyc');
+      assert.strictEqual(await child.query('get_current_state'), 'Initializing');
+      assert.strictEqual((await child.result()).account_created, true);
+      assert.deepStrictEqual(calls.slice(0, 2), ['getClient attempt 1 failed', 'getClient attempt 2 failed']);
+      const statuses: string[] = await parent.result();
+      assert.deepStrictEqual(statuses.slice(0, 3), [
+        'New College Fund account status changed: Waiting KYC',
+        'New College Fund account status changed: Waiting Compliance Review',
+        'New College Fund account status changed: Compliance review has been approved. Creating Investment Account',
       ]);
     });
   });
@@ -369,11 +402,8 @@ describe('failure scenarios', function () {
   });
 
   it('derives the workflow ID from the chat, client and account name', () => {
-    assert.strictEqual(
-      openAccountWorkflowId('chat-1', '123', '  Kids College Fund! '),
-      'OpenAccount-chat-1-123-kids-college-fund',
-    );
-    assert.strictEqual(openAccountWorkflowId('chat-1', '123', 'car'), openAccountWorkflowId('chat-1', '123', 'Car'));
+    // The account name as given, like the reference implementation
+    assert.strictEqual(openAccountWorkflowId('chat-1', '123', 'Kids College Fund'), 'OpenAccount-chat-1-123-Kids College Fund');
     // Two chats for the same client and account name don't collide
     assert.notStrictEqual(openAccountWorkflowId('chat-1', '123', 'Car'), openAccountWorkflowId('chat-2', '123', 'Car'));
   });
@@ -406,12 +436,45 @@ describe('business rules', () => {
     await validateNewAccount(CLIENT_ID, 'College Fund', 1000);
   });
 
-  it('rejects a name the client already has, ignoring case and spaces', async () => {
-    const [existing] = new InvestmentManager().listInvestmentAccounts(CLIENT_ID);
-    assert.ok(existing, `client ${CLIENT_ID} needs at least one account in data/investments.json`);
-    const failure = await failureOf(1000, `  ${existing.name.toUpperCase()} `);
-    assert.strictEqual(failure.type, 'DuplicateAccountName');
-    assert.strictEqual(failure.nonRetryable, true);
+  it('only checks the initial deposit', async () => {
+    // No other rules, e.g. a name the client already has is allowed, as in the reference implementation
+    await validateNewAccount(CLIENT_ID, 'Checking', 100);
+    await validateNewAccount(CLIENT_ID, 'Checking', 1_000_000);
+  });
+});
+
+describe('removeInvestment (saga compensation)', () => {
+  it('counts an account that is already gone as removed, so a retry succeeds', async () => {
+    // No such client or account: nothing is written to data/investments.json
+    const removed = await new MockActivityEnvironment().run(removeInvestment, 'no-such-client', 'i-already-removed');
+    assert.strictEqual(removed, true);
+  });
+});
+
+describe('worker workflows', () => {
+  it('runs the Open Account workflow on this worker unless another task queue is set for it', () => {
+    assert.strictEqual(workflowsModule('VAISupervisor', undefined), './workflows/index');
+    assert.strictEqual(workflowsModule('VAISupervisor', ''), './workflows/index');
+    assert.strictEqual(workflowsModule('VAISupervisor', 'VAISupervisor'), './workflows/index');
+    assert.strictEqual(workflowsModule('VAISupervisor', 'OpenAccount'), './workflows/supervisor-only');
+  });
+
+  it('leaves the Open Account workflow out of the supervisor-only bundle', () => {
+    const workflowsDir = path.join(__dirname, '../workflows');
+    const exportsOf = (module: string) => Object.keys(require(path.join(workflowsDir, module)) as object).sort();
+    assert.deepStrictEqual(exportsOf('supervisor-only'), ['WealthManagementWorkflow']);
+    assert.deepStrictEqual(exportsOf('index'), ['OpenInvestmentAccountWorkflow', 'WealthManagementWorkflow']);
+  });
+});
+
+describe('USE_CLAIM_CHECK', () => {
+  it('accepts the same values as the Python versions, ignoring case', () => {
+    for (const value of ['true', 'True', 'TRUE', 't', '1', 'yes', 'YES', 'y']) {
+      assert.strictEqual(useClaimCheck(value), true, value);
+    }
+    for (const value of [undefined, '', 'false', 'False', '0', 'no', 'off']) {
+      assert.strictEqual(useClaimCheck(value), false, String(value));
+    }
   });
 });
 

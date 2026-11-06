@@ -40,21 +40,22 @@ recovers (see [Failure scenarios](../src/temporal_supervisor/README.md#failure-s
 Click **Hide chaos** to close it.
 
 When you open a new investment account, approve the compliance review in another terminal with
-either of the commands below. The UI doesn't show the child workflow ID; see
+either of the commands below. Quote the child workflow ID: it ends with the account name, which can
+contain spaces. The UI doesn't show the ID; see
 [how to find it](../src/temporal_supervisor/README.md#send-the-compliance-reviewed-signal).
 
 ### Send the Compliance Reviewed Signal (Local)
 From the project root:
 ```bash
 cd src/temporal_supervisor
-./localsendcomplianceapproval.sh <Child Workflow ID>
+./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
 ### Send the Compliance Reviewed Signal (Cloud)
 From the project root:
 ```bash
 cd src/temporal_supervisor
-./cloudsendcomplianceapproval.sh <Child Workflow ID>
+./cloudsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
 ## Tests

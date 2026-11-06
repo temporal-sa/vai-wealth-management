@@ -5,6 +5,7 @@ import {
   SUPERVISOR_INSTRUCTIONS,
   BENE_INSTRUCTIONS,
   INVEST_INSTRUCTIONS,
+  STANDALONE_INVEST_INSTRUCTIONS,
   OPEN_ACCOUNT_INSTRUCTIONS,
   INVEST_AGENT_NAME,
 } from '../../common/agent-constants';
@@ -39,6 +40,22 @@ describe('agent instructions', () => {
       );
     }
     assert.ok(OPEN_ACCOUNT_INSTRUCTIONS.includes(`immediately hand off to the ${INVEST_AGENT_NAME}`));
+  });
+
+  it('Investment Agent hands off to open an account, except in the standalone version', () => {
+    assert.ok(
+      INVEST_INSTRUCTIONS.includes(
+        'If they wish to open a new account, hand off to the Open Account Agent with the handoff_to_open_account_agent tool.',
+      ),
+    );
+    // The standalone Investment Agent opens accounts itself and has no Open Account Agent
+    assert.ok(STANDALONE_INVEST_INSTRUCTIONS.includes('If they wish to open a new account, use the open_investment tool.'));
+    assert.ok(!/Open Account Agent|handoff_to_open_account_agent/.test(STANDALONE_INVEST_INSTRUCTIONS));
+  });
+
+  it('Open Account Agent checks the status with get_account_opening_status', () => {
+    assert.ok(OPEN_ACCOUNT_INSTRUCTIONS.includes('get_account_opening_status'));
+    assert.ok(!OPEN_ACCOUNT_INSTRUCTIONS.includes('get_account_status'));
   });
 
   it('has no guardrail code', () => {

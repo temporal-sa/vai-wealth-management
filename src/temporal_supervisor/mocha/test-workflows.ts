@@ -1,8 +1,8 @@
 // Workflows for the failure-scenario tests: the real Open Account workflow, plus a stand-in
 // for the supervisor that records the status signals the Open Account workflow sends it.
 import { condition, defineQuery, defineSignal, setHandler } from '@temporalio/workflow';
-import type { OpenInvestmentAccountInput, UpdateStatusInput } from '../shared';
-import { UPDATE_STATUS_SIGNAL, statusText } from '../shared';
+import type { OpenInvestmentAccountInput, UpdateAccountOpeningStateInput } from '../shared';
+import { UPDATE_ACCOUNT_OPENING_STATE_SIGNAL, accountStatusText } from '../shared';
 import { startOpenAccount } from '../workflows/start-open-account';
 
 export { OpenInvestmentAccountWorkflow } from '../workflows/open-account';
@@ -13,9 +13,9 @@ export const getStatusesQuery = defineQuery<string[]>('get_statuses');
 export async function TestParentWorkflow(): Promise<string[]> {
   const statuses: string[] = [];
   let finished = false;
-  setHandler(defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL), (update) => {
-    statuses.push(statusText(update));
-    finished ||= update.state === 'Complete' || !!update.state?.startsWith('Rolled back');
+  setHandler(defineSignal<[UpdateAccountOpeningStateInput]>(UPDATE_ACCOUNT_OPENING_STATE_SIGNAL), (update) => {
+    statuses.push(accountStatusText(update.account_name, update.state));
+    finished ||= update.state === 'Complete' || update.state.startsWith('Rolled back');
   });
   setHandler(getStatusesQuery, () => statuses);
   await condition(() => finished);

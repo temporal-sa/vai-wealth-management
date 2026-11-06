@@ -142,7 +142,7 @@ All parameters are query parameters.
 | `TEMPORAL_API_KEY`    | empty              | API key for Temporal Cloud         |
 | `TEMPORAL_TLS_CLIENT_CERT_PATH`, `TEMPORAL_TLS_CLIENT_KEY_PATH` | empty | mTLS certificate and key for Temporal Cloud |
 | `TEMPORAL_TASK_QUEUE` | `VAISupervisor`    | Task queue the chat workflow is started on (must match the worker) |
-| `USE_CLAIM_CHECK`     | `false`            | Enable claim-check payload codec   |
+| `USE_CLAIM_CHECK`     | `false`            | Enable claim-check payload codec (`true`, `1` or `yes`, any case) |
 | `REDIS_HOST`          | `localhost`        | Redis host (events + claim check)  |
 | `REDIS_PORT`          | `6379`             | Redis port                         |
 

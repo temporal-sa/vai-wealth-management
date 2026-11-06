@@ -28,15 +28,6 @@ export async function updateClientDetails(
 }
 
 /**
- * Queries the OpenInvestmentAccountWorkflow child workflow for its current state.
- */
-export async function getAccountStatus(childWorkflowId: string): Promise<string> {
-  const client = await getSharedClient();
-  const handle = client.workflow.getHandle(childWorkflowId);
-  return handle.query<string>('get_current_state');
-}
-
-/**
  * The task queue for the OpenInvestmentAccountWorkflow child workflow, or null to run it on this
  * worker's task queue. Set TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT to run it on another worker, such as
  * the Java one in /java. Workflow code can't read the environment, so it asks this activity.

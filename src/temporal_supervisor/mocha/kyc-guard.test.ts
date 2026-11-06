@@ -228,3 +228,98 @@ describe('KYC guard in the supervisor workflow', function () {
     });
   });
 });
+
+// get_account_opening_status answers from the states the openings reported with the
+// update_account_opening_state signal, kept in the supervisor workflow. An unknown ID gets an answer
+// instead of a failing query that would be retried forever.
+describe('account opening status in the supervisor workflow', function () {
+  this.timeout(120_000);
+  const TASK_QUEUE = 'account-opening-status-test';
+  let env: TestWorkflowEnvironment;
+
+  before(async () => {
+    env = await TestWorkflowEnvironment.createLocal();
+  });
+
+  after(async () => {
+    await env?.teardown();
+  });
+
+  it('reports the latest state of an opening, and says when there is no such opening', async () => {
+    const suffix = Math.random().toString(36).slice(2);
+    const chatId = `account-opening-status-${suffix}`;
+    const opening = `OpenAccount-${chatId}-123-College Fund`;
+    const mistyped = `OpenAccount-${chatId}-123-College Fun`;
+    const script: Step[] = [
+      tool('handoff_to_investment_agent', { client_id: '123' }),
+      tool('handoff_to_open_account_agent'),
+      tool('get_account_opening_status', { workflow_id: opening }),
+      tool('get_account_opening_status', { workflow_id: mistyped }),
+      message('Your account is waiting for compliance review.'),
+    ];
+    const toolResults: Array<{ toolName: string; output: string }> = [];
+    const interactions: ChatInteraction[] = [];
+    // Calls to the Redis conversation activities, in order
+    const conversationCalls: string[] = [];
+
+    const worker = await Worker.create({
+      connection: env.nativeConnection,
+      taskQueue: TASK_QUEUE,
+      workflowsPath: require.resolve('./kyc-guard-workflows'),
+      plugins: [new AiSdkPlugin({ modelProvider: scriptedProvider(script, toolResults) })],
+      bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
+      activities: {
+        async getLlmTaskQueue() {
+          return TASK_QUEUE;
+        },
+        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+          conversationCalls.push('appendChatInteraction');
+          interactions.push(interaction);
+          return interactions.length;
+        },
+        async appendStatusUpdate(_workflowId: string, update: { status: string }) {
+          conversationCalls.push(`appendStatusUpdate:${update.status}`);
+          return 0;
+        },
+        async deleteConversation(workflowId: string) {
+          conversationCalls.push(`deleteConversation:${workflowId}`);
+          return true;
+        },
+      },
+    });
+
+    await worker.runUntil(async () => {
+      const chat = await env.client.workflow.start(WealthManagementWorkflow, {
+        taskQueue: TASK_QUEUE,
+        workflowId: chatId,
+        args: [],
+      });
+      // As the Open Account workflow reports its state changes
+      for (const state of ['Waiting KYC', 'Waiting Compliance Review']) {
+        await chat.signal('update_account_opening_state', { account_name: 'College Fund', state, workflow_id: opening });
+      }
+      await chat.signal('process_user_message', { user_input: "What's the status of my College Fund account?" });
+      while (interactions.length === 0) await new Promise((r) => setTimeout(r, 50));
+
+      assert.deepStrictEqual(
+        toolResults.filter((r) => r.toolName === 'get_account_opening_status').map((r) => JSON.parse(r.output).value),
+        [
+          'Waiting Compliance Review',
+          `No account opening with workflow ID ${mistyped} was found in this conversation.`,
+        ],
+      );
+      assert.deepStrictEqual(script, []);
+
+      await chat.signal('end_workflow');
+      await chat.result();
+      // The conversation is cleared when the chat starts (its ID may have been used before) and when it ends
+      assert.deepStrictEqual(conversationCalls, [
+        `deleteConversation:${chatId}`,
+        'appendStatusUpdate:New College Fund account status changed: Waiting KYC',
+        'appendStatusUpdate:New College Fund account status changed: Waiting Compliance Review',
+        'appendChatInteraction',
+        `deleteConversation:${chatId}`,
+      ]);
+    });
+  });
+});

@@ -102,6 +102,19 @@ export function kycApprovalRefusal(
 }
 
 /**
+ * The latest state an account opening in this conversation reported, from the states the supervisor
+ * keeps from the update_account_opening_state signals. No activity or query: an unknown or mistyped
+ * workflow ID gets an answer the model can act on instead of a query that fails and is retried.
+ */
+export function accountOpeningStatus(accountOpeningStates: Record<string, string>, workflowId: string): string {
+  const state = accountOpeningStates[workflowId];
+  if (state === undefined) {
+    return `No account opening with workflow ID ${workflowId} was found in this conversation.`;
+  }
+  return state;
+}
+
+/**
  * Agent instructions that include the client ID once it is known. The ID is otherwise only in the
  * conversation history, and an agent that is handed the conversation often asks for it again.
  */
@@ -259,13 +272,17 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
         return 'KYC approved. The account is now waiting for compliance review.';
       },
     }),
-    get_account_status: tool({
+    get_account_opening_status: tool({
       description:
-        'Check the current status of the account opening workflow. "Complete" or "Rolled back..." means it has finished.',
-      inputSchema: z.object({ child_workflow_id: z.string() }),
-      execute: async ({ child_workflow_id }) => {
-        ctx.traceLines.push(`get_account_status(${child_workflow_id})`);
-        return openAccountActs.getAccountStatus(child_workflow_id);
+        'Get the current status of an account opening: the latest status it reported. "Complete" means the ' +
+        'account was opened; a status starting with "Rolled back" means it was not opened. Either way, that ' +
+        'account opening is finished.',
+      inputSchema: z.object({
+        workflow_id: z.string().describe('The child_workflow_id returned by open_new_investment_account'),
+      }),
+      execute: async ({ workflow_id }) => {
+        ctx.traceLines.push(`get_account_opening_status(${workflow_id})`);
+        return accountOpeningStatus(ctx.accountOpeningStates, workflow_id);
       },
     }),
   };

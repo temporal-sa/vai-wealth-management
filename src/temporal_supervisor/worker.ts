@@ -4,8 +4,9 @@ import { AiSdkPlugin } from '@temporalio/ai-sdk';
 import { google } from '@ai-sdk/google';
 import * as activities from './activities/activities';
 import { ClientHelper } from '../common/client-helper';
-import { buildDataConverter } from '../common/data-converter';
+import { buildDataConverter, useClaimCheck } from '../common/data-converter';
 import { chaosAwareProvider } from './chaos-model';
+import { workflowsModule } from './worker-workflows';
 
 // ---------------------------------------------------------------------------
 // Concise logger — strip SDK-internal metadata, one line per entry
@@ -25,7 +26,7 @@ Runtime.install({
 });
 
 function logClaimCheckStatus(): void {
-  if (process.env.USE_CLAIM_CHECK === 'true') {
+  if (useClaimCheck()) {
     const host = process.env.REDIS_HOST ?? 'localhost';
     const port = process.env.REDIS_PORT ?? '6379';
     console.error(`Claim check enabled (redis at ${host}:${port})`);
@@ -34,9 +35,8 @@ function logClaimCheckStatus(): void {
   }
 }
 
-function logOpenAccountTaskQueue(taskQueue: string): void {
-  const openAccountQueue = process.env.TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT;
-  if (openAccountQueue) {
+function logOpenAccountTaskQueue(taskQueue: string, openAccountQueue: string | undefined): void {
+  if (openAccountQueue && openAccountQueue !== taskQueue) {
     console.error(`Open Account workflow runs on task queue ${openAccountQueue}; remember to start the Java worker`);
   } else {
     console.error(`Open Account workflow runs on this worker (task queue ${taskQueue})`);
@@ -52,7 +52,10 @@ function llmMaxCallsPerSecond(): number | undefined {
 async function run() {
   logClaimCheckStatus();
   const helper = new ClientHelper();
-  logOpenAccountTaskQueue(helper.taskQueue);
+  const openAccountQueue = process.env.TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT;
+  logOpenAccountTaskQueue(helper.taskQueue, openAccountQueue);
+  // Without the Open Account workflow when the Java worker runs it
+  const workflows = workflowsModule(helper.taskQueue, openAccountQueue);
   const connection = await NativeConnection.connect(helper.nativeConnectionOptions);
   try {
     const plugin = new AiSdkPlugin({ modelProvider: chaosAwareProvider(google) });
@@ -60,7 +63,7 @@ async function run() {
       connection,
       namespace: helper.namespace,
       taskQueue: helper.taskQueue,
-      workflowsPath: require.resolve('./workflows/index'),
+      workflowsPath: require.resolve(workflows),
       activities,
       dataConverter: buildDataConverter(),
       plugins: [plugin],
