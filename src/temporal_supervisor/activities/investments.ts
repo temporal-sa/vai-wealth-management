@@ -29,6 +29,17 @@ export async function openInvestment(
   return account;
 }
 
+/**
+ * Removes an investment account record: the saga compensation for openInvestment. An account that
+ * is already gone counts as removed, so a retried compensation succeeds.
+ */
+export async function removeInvestment(clientId: string, investmentId: string): Promise<boolean> {
+  await maybeSlowDown();
+  await coreBankingApi();
+  mgr.deleteInvestmentAccount(clientId, investmentId);
+  return true;
+}
+
 export async function closeInvestment(
   clientId: string,
   investmentId: string,
@@ -39,11 +50,7 @@ export async function closeInvestment(
 }
 
 /** Business rules for a new account. Breaking one is non-retryable: the same request would fail again. */
-export async function validateNewAccount(clientId: string, accountName: string, initialAmount: number): Promise<void> {
-  const normalized = accountName.trim().toLowerCase();
-  if (mgr.listInvestmentAccounts(clientId).some((a) => a.name.trim().toLowerCase() === normalized)) {
-    throw ApplicationFailure.nonRetryable(`An account named "${accountName}" already exists`, 'DuplicateAccountName');
-  }
+export async function validateNewAccount(_clientId: string, _accountName: string, initialAmount: number): Promise<void> {
   if (initialAmount > MAX_INITIAL_DEPOSIT) {
     throw ApplicationFailure.nonRetryable(
       `Initial deposits over ${formatUsd(MAX_INITIAL_DEPOSIT)} cannot be opened online and must be arranged with a wealth advisor`,

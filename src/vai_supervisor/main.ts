@@ -17,7 +17,7 @@ import {
   BENE_INSTRUCTIONS,
   INVEST_AGENT_NAME,
   INVEST_HANDOFF,
-  INVEST_INSTRUCTIONS,
+  STANDALONE_INVEST_INSTRUCTIONS,
   SUPERVISOR_AGENT_NAME,
   SUPERVISOR_HANDOFF,
   SUPERVISOR_INSTRUCTIONS,
@@ -193,7 +193,7 @@ const agentDefs: Record<AgentName, AgentDef> = {
   },
   investment: {
     name: INVEST_AGENT_NAME,
-    instructions: INVEST_INSTRUCTIONS,
+    instructions: STANDALONE_INVEST_INSTRUCTIONS,
     tools: {
       list_investments: listInvestments,
       open_investment: openInvestment,

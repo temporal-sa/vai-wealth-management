@@ -1,8 +1,10 @@
 # mTLS client certificate auth. The start scripts activate this profile when
-# TEMPORAL_TLS_CLIENT_CERT_PATH is set; both paths are then required.
+# TEMPORAL_TLS_CLIENT_CERT_PATH is set; the certificate and a key are then required.
+# Java's TLS needs the key as an unencrypted PKCS8 key: TEMPORAL_KEY_PKCS8_PATH when set (see
+# startcloudworker.sh), otherwise TEMPORAL_TLS_CLIENT_KEY_PATH.
 spring:
   temporal:
     connection:
       mtls:
         cert-chain-file: ${TEMPORAL_TLS_CLIENT_CERT_PATH}
-        key-file: ${TEMPORAL_TLS_CLIENT_KEY_PATH}
+        key-file: ${TEMPORAL_KEY_PKCS8_PATH:${TEMPORAL_TLS_CLIENT_KEY_PATH}}

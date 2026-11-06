@@ -8,14 +8,14 @@ import {
 } from '@temporalio/workflow';
 import type {
   ProcessUserMessageInput,
-  UpdateStatusInput,
+  UpdateAccountOpeningStateInput,
   StatusUpdate,
 } from '../shared';
 import {
   PROCESS_USER_MESSAGE_SIGNAL,
   END_WORKFLOW_SIGNAL,
-  UPDATE_STATUS_SIGNAL,
-  statusText,
+  UPDATE_ACCOUNT_OPENING_STATE_SIGNAL,
+  accountStatusText,
 } from '../shared';
 import type * as eventStreamActivities from '../activities/event-stream';
 import type * as openAccountActivities from '../activities/open-account';
@@ -36,7 +36,9 @@ const { getLlmTaskQueue } = proxyActivities<typeof openAccountActivities>({
 
 const processUserMessageSignal = defineSignal<[ProcessUserMessageInput]>(PROCESS_USER_MESSAGE_SIGNAL);
 const endWorkflowSignal = defineSignal(END_WORKFLOW_SIGNAL);
-const updateStatusSignal = defineSignal<[UpdateStatusInput]>(UPDATE_STATUS_SIGNAL);
+const updateAccountOpeningStateSignal = defineSignal<[UpdateAccountOpeningStateInput]>(
+  UPDATE_ACCOUNT_OPENING_STATE_SIGNAL,
+);
 
 // ---------------------------------------------------------------------------
 // Workflow — agent loop now runs in workflow context via @temporalio/ai-sdk
@@ -46,7 +48,8 @@ export async function WealthManagementWorkflow(): Promise<void> {
   const { workflowId } = workflowInfo();
 
   const pendingMessages: ProcessUserMessageInput[] = [];
-  const pendingStatuses: UpdateStatusInput[] = [];
+  // Status text waiting to be written to the UI's status area
+  const pendingStatuses: string[] = [];
   let done = false;
   let messages: ModelMessage[] = [];
   let clientId: string | undefined;
@@ -58,6 +61,9 @@ export async function WealthManagementWorkflow(): Promise<void> {
   let kycDetailsShownTurn: Record<string, number> = {};
   // Latest state of each account opening started in this conversation, keyed by its workflow ID
   const accountOpeningStates: Record<string, string> = {};
+  // Number of account openings started in this conversation: each one gets the next number in its
+  // workflow ID, so every request to open an account starts a new opening, even for the same name
+  let accountOpeningsStarted = 0;
   let llmTaskQueue: string | undefined;
 
   setHandler(processUserMessageSignal, (msg: ProcessUserMessageInput) => {
@@ -70,22 +76,25 @@ export async function WealthManagementWorkflow(): Promise<void> {
     done = true;
   });
 
-  setHandler(updateStatusSignal, (update: UpdateStatusInput) => {
-    log.info('Signal received: update_status', { status: statusText(update) });
-    if (update.workflow_id && update.state !== undefined) {
+  setHandler(updateAccountOpeningStateSignal, (update: UpdateAccountOpeningStateInput) => {
+    log.info('Account opening state changed', { accountName: update.account_name, state: update.state });
+    if (update.workflow_id) {
       accountOpeningStates[update.workflow_id] = update.state;
     }
-    pendingStatuses.push(update);
+    pendingStatuses.push(accountStatusText(update.account_name, update.state));
   });
 
   log.info('WealthManagementWorkflow started', { workflowId });
+
+  // The demo reuses chat workflow IDs (e.g. a chat started again after its workflow was terminated,
+  // which skips the delete at the end), so clear any conversation left in Redis under this ID first.
+  await deleteConversation(workflowId);
 
   while (!done) {
     await condition(() => pendingMessages.length > 0 || pendingStatuses.length > 0 || done);
 
     while (pendingStatuses.length > 0) {
-      const update = pendingStatuses.shift()!;
-      const statusUpdate: StatusUpdate = { status: statusText(update) };
+      const statusUpdate: StatusUpdate = { status: pendingStatuses.shift()! };
       log.info('Processing status update', { status: statusUpdate.status });
       await appendStatusUpdate(workflowId, statusUpdate);
     }
@@ -108,6 +117,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
         kycDetailsShownTurn,
         llmTaskQueue,
         accountOpeningStates,
+        accountOpeningsStarted,
       });
 
       messages = result.messages;
@@ -115,6 +125,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
       childWorkflowId = result.childWorkflowId;
       activeAgent = result.activeAgent;
       kycDetailsShownTurn = result.kycDetailsShownTurn;
+      accountOpeningsStarted = result.accountOpeningsStarted;
       log.info('Agent turn complete', { clientId: result.clientId, agentTrace: result.interaction.agent_trace });
 
       await appendChatInteraction(workflowId, result.interaction);
@@ -130,8 +141,8 @@ export async function WealthManagementWorkflow(): Promise<void> {
     //   - Wait for allHandlersFinished() and drain the pending message and
     //     status queues first, so no customer message or status update is lost.
     //   - Carry the conversation state into the new run: the message history, the
-    //     active agent, the client ID, the account-opening states, and the KYC
-    //     guard's turn tracking.
+    //     active agent, the client ID, the account-opening states, the number of
+    //     account openings started, and the KYC guard's turn tracking.
     //   - Open-account child workflows are started with ParentClosePolicy.TERMINATE,
     //     which also applies when the parent continues-as-new, so an opening waiting
     //     for KYC or compliance would be terminated. Use ParentClosePolicy.ABANDON and

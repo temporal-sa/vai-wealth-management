@@ -15,9 +15,9 @@ import type {
   OpenInvestmentAccountInput,
   OpenInvestmentAccountOutput,
   WealthManagementClient,
-  UpdateStatusInput,
+  UpdateAccountOpeningStateInput,
 } from '../shared';
-import { UPDATE_STATUS_SIGNAL } from '../shared';
+import { UPDATE_ACCOUNT_OPENING_STATE_SIGNAL } from '../shared';
 import { TOOL_RETRY_POLICY } from '../retry-policies';
 import type * as clientActivities from '../activities/clients';
 import type * as investmentActivities from '../activities/investments';
@@ -27,7 +27,7 @@ import type * as custodianActivities from '../activities/custodian';
 // One attempt may take 30 seconds; an outage is retried for as long as it lasts
 const activityOptions = { startToCloseTimeout: '30s', retry: TOOL_RETRY_POLICY } as const;
 const { getClient, updateClient } = proxyActivities<typeof clientActivities>(activityOptions);
-const { openInvestment, closeInvestment } = proxyActivities<typeof investmentActivities>(activityOptions);
+const { openInvestment, removeInvestment } = proxyActivities<typeof investmentActivities>(activityOptions);
 const { debitLinkedAccount, creditLinkedAccount } = proxyActivities<typeof fundingActivities>(activityOptions);
 const { registerAccount } = proxyActivities<typeof custodianActivities>(activityOptions);
 
@@ -83,24 +83,37 @@ export async function OpenInvestmentAccountWorkflow(
 
   const { client_id, account_name, initial_amount, parent_workflow_id, promo_code } = input;
 
-  // Every state change is visible to get_account_status and reported to the parent, which shows
-  // it in the UI's status area. Signals are routed by workflow ID, so this reaches the parent
+  // Every state change is visible to the get_current_state query and reported to the parent, which
+  // keeps it for the agent's get_account_opening_status tool and shows it in the UI's status area. Signals are routed by workflow ID, so this reaches the parent
   // whichever task queue it runs on. Without a parent (the workflow was started on its own, e.g. by
   // run_open_account_workflow.ts) there is no one to report to.
   async function setState(newState: string) {
     state = newState;
     log.info(`State: ${newState}`, { account_name });
     if (!parent_workflow_id) return;
-    const update: UpdateStatusInput = { account_name, state: newState, workflow_id: workflowInfo().workflowId };
-    await getExternalWorkflowHandle(parent_workflow_id).signal(UPDATE_STATUS_SIGNAL, update);
+    const update: UpdateAccountOpeningStateInput = {
+      account_name,
+      state: newState,
+      workflow_id: workflowInfo().workflowId,
+    };
+    await getExternalWorkflowHandle(parent_workflow_id).signal(UPDATE_ACCOUNT_OPENING_STATE_SIGNAL, update);
   }
 
   // Query handlers
   setHandler(getCurrentStateQuery, () => state);
 
-  // Signal handlers
-  setHandler(verifyKycSignal, () => { kycApproved = true; });
-  setHandler(complianceApprovedSignal, () => { complianceApproved = true; });
+  // Signal handlers. Each waits for the steps before it, so an early signal takes effect only once
+  // the workflow gets there: KYC once the client details are loaded, compliance once KYC is approved.
+  setHandler(verifyKycSignal, async () => {
+    await condition(() => initialized);
+    log.info('KYC has been verified', { account_name });
+    kycApproved = true;
+  });
+  setHandler(complianceApprovedSignal, async () => {
+    await condition(() => initialized && kycApproved);
+    log.info('Compliance has been approved', { account_name });
+    complianceApproved = true;
+  });
 
   // Update handlers
   setHandler(getClientDetailsUpdate, async () => {
@@ -131,10 +144,10 @@ export async function OpenInvestmentAccountWorkflow(
 
   // Step 4: Create, fund and register the investment account
   const bonus = promo_code ? welcomeBonus(promo_code, initial_amount) : 0;
-  // Idempotency key: stable across activity retries and worker restarts. It includes the run ID
-  // because the workflow ID is reused when the customer opens an account with the same name again
-  // in the same chat (e.g. after a rollback), and a reused key would return the earlier transfer
-  // without moving any money.
+  // Idempotency key: stable across activity retries and worker restarts. The chat gives every
+  // account opening its own workflow ID; the run ID keeps the key unique even if a workflow ID is
+  // ever used again (e.g. a workflow started on its own with an earlier ID), since a reused key
+  // would return the earlier transfer without moving any money.
   const transferId = `${workflowInfo().workflowId}-${workflowInfo().runId}-initial-deposit`;
 
   // Saga: each completed step registers how to undo it. If a later step fails with a
@@ -146,7 +159,7 @@ export async function OpenInvestmentAccountWorkflow(
     const account = await openInvestment(client_id, account_name, initial_amount + bonus);
     compensations.unshift({
       description: 'removing the account record',
-      undo: () => closeInvestment(client_id, account.investment_id),
+      undo: () => removeInvestment(client_id, account.investment_id),
     });
 
     await setState(`Transferring ${formatUsd(initial_amount)} from the linked bank account.`);

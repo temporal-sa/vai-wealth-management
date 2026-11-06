@@ -4,4 +4,4 @@ if [ -z "$1" ]; then
    exit 1
 fi
 # source ../../setclaimcheck.sh
-npm run compliance.approval -- --workflow-id $1
+npm run compliance.approval -- --workflow-id "$1"

@@ -96,7 +96,7 @@ class Runner {
   async start(scenario: number): Promise<Handle> {
     const { accountName, amount } = SCENARIOS[scenario];
     // Like the chat's IDs (OpenAccount-<chat>-<client>-<account>), with this run in place of the chat
-    const workflowId = `OpenAccount-standalone-${this.runId}-${CLIENT_ID}-${accountName.toLowerCase()}`;
+    const workflowId = `OpenAccount-standalone-${this.runId}-${CLIENT_ID}-${accountName}`;
     const input: OpenInvestmentAccountInput = {
       client_id: CLIENT_ID,
       account_name: accountName,
@@ -158,7 +158,7 @@ class Runner {
     await followStates(handle, (s) => s === WAITING_COMPLIANCE_REVIEW, undefined, seen);
 
     console.log('*****>>> Send the compliance approval for this workflow, in another terminal:');
-    console.log(`*****>>>   src/temporal_supervisor/localsendcomplianceapproval.sh ${handle.workflowId}`);
+    console.log(`*****>>>   src/temporal_supervisor/localsendcomplianceapproval.sh "${handle.workflowId}"`);
     await followStates(handle, (s) => s !== WAITING_COMPLIANCE_REVIEW, 24 * 60 * 60 * 1000, seen);
     console.log('Compliance approved');
     await finish(handle, seen);

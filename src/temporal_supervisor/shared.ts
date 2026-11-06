@@ -9,33 +9,28 @@ export function llmTaskQueue(taskQueue: string): string {
 // Signal names — must match the Python temporal_supervisor signal definitions exactly
 export const PROCESS_USER_MESSAGE_SIGNAL = 'process_user_message';
 export const END_WORKFLOW_SIGNAL = 'end_workflow';
-export const UPDATE_STATUS_SIGNAL = 'update_status';
+export const UPDATE_ACCOUNT_OPENING_STATE_SIGNAL = 'update_account_opening_state';
 
 export interface ProcessUserMessageInput {
   user_input: string;
 }
 
 /**
- * Payload of the update_status signal. An Open Account workflow reports each state change with
- * account_name, state and workflow_id; the supervisor turns that into the status text shown in the
- * UI (see accountStatusText). Other senders can pass ready-made text in status instead.
+ * Payload of the update_account_opening_state signal, which an Open Account workflow sends its
+ * parent on every state change. The supervisor keeps the latest state per workflow ID (read by the
+ * get_account_opening_status tool) and shows accountStatusText in the UI.
  */
-export interface UpdateStatusInput {
-  status?: string;
-  account_name?: string;
-  state?: string;
-  workflow_id?: string;
+export interface UpdateAccountOpeningStateInput {
+  account_name: string;
+  state: string;
+  // The Open Account workflow that reported the state. Optional so that senders that don't set it
+  // keep working.
+  workflow_id?: string | null;
 }
 
 // The status text shown in the UI when an account opening changes state
 export function accountStatusText(accountName: string, state: string): string {
   return `New ${accountName} account status changed: ${state}`;
-}
-
-// The status text for an update_status signal
-export function statusText(input: UpdateStatusInput): string {
-  if (input.status !== undefined && input.status !== null) return input.status;
-  return accountStatusText(input.account_name ?? '', input.state ?? '');
 }
 
 export interface ChatInteraction {

@@ -6,7 +6,7 @@ import io.temporal.demo.wealthmanagement.common.ServerInfo;
 import io.temporal.demo.wealthmanagement.model.InvestmentAccount;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountOutput;
-import io.temporal.demo.wealthmanagement.model.UpdateStatusInput;
+import io.temporal.demo.wealthmanagement.model.UpdateAccountOpeningStateInput;
 import io.temporal.demo.wealthmanagement.model.WealthManagementClient;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
@@ -91,10 +91,10 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         String accountName = input.accountName();
         double amount = input.initialAmount();
         double bonus = input.promoCode() != null ? welcomeBonus(input.promoCode(), amount) : 0.0;
-        // Idempotency key: stable across activity retries and worker restarts. It includes the run ID
-        // because the workflow ID is reused when the customer opens an account with the same name again
-        // in the same chat (e.g. after a rollback), and a reused key would return the earlier transfer
-        // without moving any money.
+        // Idempotency key: stable across activity retries and worker restarts. The chat gives every
+        // account opening its own workflow ID; the run ID keeps the key unique even if a workflow ID is
+        // ever used again (e.g. a workflow started on its own with an earlier ID), since a reused key
+        // would return the earlier transfer without moving any money.
         String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId()
                 + "-initial-deposit";
 
@@ -104,7 +104,7 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
             InvestmentAccount account = activities.execute("openInvestment", InvestmentAccount.class,
                     clientId, accountName, amount + bonus);
             saga.addCompensation(() -> compensate("removing the account record",
-                    "closeInvestment", clientId, account.investmentId()));
+                    "removeInvestment", clientId, account.investmentId()));
 
             setState(String.format("Transferring %s from the linked bank account.", formatUsd(amount)));
             activities.execute("debitLinkedAccount", Map.class, clientId, amount, transferId);
@@ -175,18 +175,24 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         return result;
     }
 
+    // Each signal waits for the steps before it, so an early signal takes effect only once the workflow
+    // gets there: KYC once the client details are loaded, compliance once KYC is approved.
     @Override
     public void verifyKyc() {
+        Workflow.await(() -> initialized);
+        log.info("KYC has been verified");
         kycApproved = true;
     }
 
     @Override
     public void complianceApproved() {
+        Workflow.await(() -> initialized && kycApproved);
+        log.info("Compliance has been approved");
         complianceApproved = true;
     }
 
-    // Every state change is visible to get_account_status and reported to the parent, which shows it
-    // in the UI's status area. Signals are routed by workflow ID, not task queue, so this reaches the
+    // Every state change is visible to the get_current_state query and reported to the parent, which
+    // keeps it for the agent's get_account_opening_status tool and shows it in the UI's status area. Signals are routed by workflow ID, not task queue, so this reaches the
     // TypeScript supervisor even though it runs on a different task queue. Without a parent (the workflow
     // was started on its own, e.g. by run_open_account_workflow.ts) there is no one to report to.
     private void setState(String newState) {
@@ -197,7 +203,7 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
             return;
         }
         Workflow.newUntypedExternalWorkflowStub(parentWorkflowId)
-                .signal("update_status", UpdateStatusInput.accountState(
+                .signal("update_account_opening_state", new UpdateAccountOpeningStateInput(
                         input.accountName(), newState, Workflow.getInfo().getWorkflowId()));
     }
 }

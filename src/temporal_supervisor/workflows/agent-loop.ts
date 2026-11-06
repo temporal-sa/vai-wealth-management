@@ -78,6 +78,9 @@ interface AgentRunContext {
   // Latest state of each account opening in this conversation, keyed by its workflow ID. Shared
   // with the supervisor workflow, which updates it from the status signals.
   accountOpeningStates: Record<string, string>;
+  // Number of account openings started so far in this conversation. The next one gets the next
+  // number in its workflow ID (see openAccountWorkflowId).
+  accountOpeningsStarted: number;
 }
 
 export const KYC_NOT_APPROVED =
@@ -99,6 +102,19 @@ export function kycApprovalRefusal(
   const shownTurn = kycDetailsShownTurn[childWorkflowId];
   if (shownTurn === undefined || shownTurn >= turn) return KYC_NOT_APPROVED;
   return undefined;
+}
+
+/**
+ * The latest state an account opening in this conversation reported, from the states the supervisor
+ * keeps from the update_account_opening_state signals. No activity or query: an unknown or mistyped
+ * workflow ID gets an answer the model can act on instead of a query that fails and is retried.
+ */
+export function accountOpeningStatus(accountOpeningStates: Record<string, string>, workflowId: string): string {
+  const state = accountOpeningStates[workflowId];
+  if (state === undefined) {
+    return `No account opening with workflow ID ${workflowId} was found in this conversation.`;
+  }
+  return state;
 }
 
 /**
@@ -179,8 +195,9 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
   return {
     open_new_investment_account: tool({
       description:
-        'Begin opening a new investment account. Returns the child workflow ID to track progress. ' +
-        'If this account is already being opened, returns that one instead of starting another.',
+        'Begin opening a new investment account. Each call starts a new account opening, with its own KYC, ' +
+        'even if an account with the same name was opened or is being opened. Returns the child workflow ID ' +
+        'to track progress.',
       inputSchema: z.object({
         client_id: z.string(),
         account_name: z.string().describe('Name of the new investment account'),
@@ -205,19 +222,21 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           promo_code,
         };
         const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
-        const { childWorkflowId, alreadyRunning } = await startOpenAccount(workflowInput, taskQueue);
-        ctx.childWorkflowId = childWorkflowId;
-        if (!alreadyRunning) ctx.accountOpeningStates[childWorkflowId] = 'Initializing';
-        ctx.traceLines.push(
-          `open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childWorkflowId}` +
-            (alreadyRunning ? ' (already in progress)' : ''),
-        );
-        if (alreadyRunning) {
-          return {
-            child_workflow_id: childWorkflowId,
-            message: `Account "${account_name}" is already being opened. Continue with that process; no new one was started.`,
-          };
+        // Take the next opening number with no await in between, so two calls in the same model
+        // step can't get the same one. Give it back if the opening couldn't be started.
+        const openingNumber = ++ctx.accountOpeningsStarted;
+        let childWorkflowId: string;
+        try {
+          childWorkflowId = await startOpenAccount(workflowInput, openingNumber, taskQueue);
+        } catch (err) {
+          if (ctx.accountOpeningsStarted === openingNumber) ctx.accountOpeningsStarted -= 1;
+          throw err;
         }
+        ctx.childWorkflowId = childWorkflowId;
+        ctx.accountOpeningStates[childWorkflowId] = 'Initializing';
+        ctx.traceLines.push(
+          `open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → ${childWorkflowId}`,
+        );
         return { child_workflow_id: childWorkflowId, message: 'Account opening process started.' };
       },
     }),
@@ -259,13 +278,17 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
         return 'KYC approved. The account is now waiting for compliance review.';
       },
     }),
-    get_account_status: tool({
+    get_account_opening_status: tool({
       description:
-        'Check the current status of the account opening workflow. "Complete" or "Rolled back..." means it has finished.',
-      inputSchema: z.object({ child_workflow_id: z.string() }),
-      execute: async ({ child_workflow_id }) => {
-        ctx.traceLines.push(`get_account_status(${child_workflow_id})`);
-        return openAccountActs.getAccountStatus(child_workflow_id);
+        'Get the current status of an account opening: the latest status it reported. "Complete" means the ' +
+        'account was opened; a status starting with "Rolled back" means it was not opened. Either way, that ' +
+        'account opening is finished.',
+      inputSchema: z.object({
+        workflow_id: z.string().describe('The child_workflow_id returned by open_new_investment_account'),
+      }),
+      execute: async ({ workflow_id }) => {
+        ctx.traceLines.push(`get_account_opening_status(${workflow_id})`);
+        return accountOpeningStatus(ctx.accountOpeningStates, workflow_id);
       },
     }),
   };
@@ -446,6 +469,8 @@ export interface RunAgentTurnInput {
   llmTaskQueue: string;
   // The supervisor's account opening states; a newly started opening is added to it
   accountOpeningStates: Record<string, string>;
+  // Number of account openings started so far in this conversation
+  accountOpeningsStarted: number;
 }
 
 export interface RunAgentTurnOutput {
@@ -455,6 +480,7 @@ export interface RunAgentTurnOutput {
   childWorkflowId?: string;
   activeAgent: AgentName;
   kycDetailsShownTurn: Record<string, number>;
+  accountOpeningsStarted: number;
 }
 
 export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTurnOutput> {
@@ -469,6 +495,7 @@ export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTu
     turn,
     kycDetailsShownTurn: { ...input.kycDetailsShownTurn },
     accountOpeningStates: input.accountOpeningStates,
+    accountOpeningsStarted: input.accountOpeningsStarted,
   };
 
   const updatedMessages: ModelMessage[] = [
@@ -492,5 +519,6 @@ export async function runAgentTurn(input: RunAgentTurnInput): Promise<RunAgentTu
     childWorkflowId: ctx.childWorkflowId,
     activeAgent: nextAgent,
     kycDetailsShownTurn: ctx.kycDetailsShownTurn,
+    accountOpeningsStarted: ctx.accountOpeningsStarted,
   };
 }

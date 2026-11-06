@@ -2,6 +2,7 @@ import express, { Request, Response } from 'express';
 import cors from 'cors';
 import { WorkflowIdReusePolicy } from '@temporalio/common';
 import { ClientHelper } from '../common/client-helper';
+import { useClaimCheck } from '../common/data-converter';
 import { EventStreamManager } from '../temporal_supervisor/redis/event-stream-manager';
 import { ChaosManager, isChaosFlag } from '../common/chaos-manager';
 import {
@@ -14,7 +15,7 @@ const HOST = process.env.API_HOST ?? '127.0.0.1';
 const PORT = Number(process.env.API_PORT ?? 8000);
 
 function logClaimCheckStatus(): void {
-  if (process.env.USE_CLAIM_CHECK === 'true') {
+  if (useClaimCheck()) {
     const host = process.env.REDIS_HOST ?? 'localhost';
     const port = process.env.REDIS_PORT ?? '6379';
     console.log(`Claim check enabled (redis at ${host}:${port})`);

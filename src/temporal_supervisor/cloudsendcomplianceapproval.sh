@@ -5,4 +5,4 @@ if [ -z "$1" ]; then
 fi
 # source ../../setclaimcheck.sh
 source ../../setcloudenv.sh
-npm run compliance.approval -- --workflow-id $1
+npm run compliance.approval -- --workflow-id "$1"

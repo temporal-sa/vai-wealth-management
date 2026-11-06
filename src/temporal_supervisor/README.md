@@ -186,7 +186,10 @@ The worker polls the `VAISupervisor` task queue, and runs the model calls on `VA
 
 To run the Open Account child workflow in Java instead, pass a task queue name to the worker
 and start the [Java worker](../../java/README.md) with the same name. The argument sets
-`TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` (see `setsplitworkflows.sh` in the project root). This works the
+`TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` (see `setsplitworkflows.sh` in the project root). When that queue
+differs from the worker's own (`TEMPORAL_TASK_QUEUE`), the TypeScript worker registers only the supervisor
+workflow ([workflows/supervisor-only.ts](workflows/supervisor-only.ts)) and leaves the Open Account workflow
+to the Java worker; otherwise it registers both ([workflows/index.ts](workflows/index.ts)). This works the
 same way with `startcloudworker.sh`.
 
 ```shell
@@ -221,13 +224,19 @@ When you open a new investment account, the workflow waits for a compliance revi
 
 ```shell
 cd src/temporal_supervisor
-./localsendcomplianceapproval.sh <Child Workflow ID>
+./localsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
-The child workflow ID is `OpenAccount-<chat workflow ID>-<client ID>-<account-name-slug>`, where the slug is
-the account name lowercased, with each run of other characters replaced by a dash. Each chat in the UX gets a
-random workflow ID starting with `vai-temporal-agent-`, so opening "College Fund" for client 123 gives
-something like `OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-college-fund`.
+The child workflow ID is `OpenAccount-<chat workflow ID>-<client ID>-<account name>-<n>`, with the account
+name exactly as the customer gave it and `<n>` the number of account openings started in the chat so far,
+this one included (1, 2, 3, ...). Each chat in the UX gets a random workflow ID starting with
+`vai-temporal-agent-`, so opening "College Fund" for client 123 as the chat's first opening gives something
+like `OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund-1`. Account names can contain spaces, so put
+the ID in quotes:
+
+```shell
+./localsendcomplianceapproval.sh "OpenAccount-vai-temporal-agent-k3j9x2m1q8-123-College Fund-1"
+```
 
 The UX doesn't show this ID (it logs the chat's workflow ID in the browser console). To find it, open the [Temporal UI](http://localhost:8233) and look for the
 running `OpenInvestmentAccountWorkflow` (it is a child of the chat's `WealthManagementWorkflow`), or use the CLI:
@@ -236,9 +245,11 @@ running `OpenInvestmentAccountWorkflow` (it is a child of the chat's `WealthMana
 temporal workflow list --query "WorkflowType='OpenInvestmentAccountWorkflow' AND ExecutionStatus='Running'"
 ```
 
-Because the ID comes from the chat and the account name, only one opening per account name runs at a time in
-a chat: if the agent asks to open the same account again, it continues the opening already in progress. Once
-that opening finishes (opened or rolled back), the same name can be opened again.
+Every request to open an account starts a new account opening (a new child workflow) with its own KYC, even if
+an account with the same name was opened, or is still being opened, earlier in the chat. Opening "Vacation"
+twice gives two workflows, `...-123-Vacation-1` and `...-123-Vacation-2`, which can both be pending at once; the
+customer confirms their details for each, and each needs its own compliance approval. If more than one is
+running, the list above shows them all: pick the one whose ID ends with the number you want.
 
 ### Testing the open-account workflow on its own
 
@@ -253,7 +264,7 @@ it reports (from the `get_current_state` query) and the result:
    completes KYC: client 123's last name becomes "Doenut"), then compliance approved.
 3. KYC approved, then the workflow waits in `Waiting Compliance Review` until you send the approval yourself.
    The script prints the command to run from the project root, for example
-   `src/temporal_supervisor/localsendcomplianceapproval.sh OpenAccount-standalone-<run>-123-vacation3`.
+   `src/temporal_supervisor/localsendcomplianceapproval.sh "OpenAccount-standalone-<run>-123-Vacation3"`.
 
 Temporal must be running (and Redis, as for the demo). The script can be run from any directory:
 
@@ -288,18 +299,19 @@ git checkout data/
 
 1. The Investment Agent hands off to the Open Account Agent, which calls the `open_new_investment_account`
    tool with the client ID, account name and initial amount. The tool first checks the business rules
-   (`validateNewAccount`: a deposit from $100 to $1,000,000, and a name the client doesn't already have).
-   If one is broken, the agent explains why and no workflow is started. Otherwise it starts the
+   (`validateNewAccount`: a deposit from $100 to $1,000,000). If one is broken, the agent explains why and no workflow is started. Otherwise it starts the
    `OpenInvestmentAccountWorkflow` child workflow
    ([workflows/start-open-account.ts](workflows/start-open-account.ts)) on the supervisor's task queue, or on
    `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` when the [Java worker](../../java/README.md) runs it, and returns the
    child workflow ID.
 2. The child workflow ([workflows/open-account.ts](workflows/open-account.ts)) loads the client's details and
-   moves to `Waiting KYC`. Every state change is sent to the chat workflow with the `update_status` signal
-   (`{account_name, state, workflow_id}`), which writes `New <account> account status changed: <state>` to
-   Redis; the UX shows it in its status area. The agent itself learns the status by calling the
-   `get_account_status` tool, which queries `get_current_state` on the child. It only does so while handling a
-   customer message, so the customer asks (for example "what's the status?") to get an update in the chat.
+   moves to `Waiting KYC`. Every state change is sent to the chat workflow with the `update_account_opening_state`
+   signal (`{account_name, state, workflow_id}`). The chat workflow keeps the latest state of each opening and
+   writes `New <account> account status changed: <state>` to Redis; the UX shows it in its status area. The
+   agent itself learns the status by calling the `get_account_opening_status(workflow_id)` tool, which reads
+   the state the chat workflow kept (no query or activity, so an unknown or mistyped ID gets `No account
+   opening with workflow ID <id> was found in this conversation.`). It only does so while handling a customer
+   message, so the customer asks (for example "what's the status?") to get an update in the chat.
 3. KYC: the agent calls `get_current_client_info` (the `get_client_details` update, which waits until the
    details are loaded), shows the details, and asks if they are correct. If the customer confirms in a later
    message, `approve_kyc` sends the `verify_kyc` signal. The tool refuses to approve in the same turn the
@@ -307,11 +319,14 @@ git checkout data/
    agent collects the changes and calls `update_client_details` (an update that saves them to
    `data/clients.json` and also approves KYC).
 4. The workflow moves to `Waiting Compliance Review` and waits for the `compliance_approved` signal, which you
-   send with `localsendcomplianceapproval.sh` / `cloudsendcomplianceapproval.sh <Child Workflow ID>`.
+   send with `localsendcomplianceapproval.sh` / `cloudsendcomplianceapproval.sh "<Child Workflow ID>"`. The
+   signal handlers wait for the steps before them: `verify_kyc` takes effect once the client details are
+   loaded, and `compliance_approved` once KYC is approved, so an early signal is not lost or applied out of order.
 5. The account is then opened as a saga: create the account record (`openInvestment`), transfer the initial
    deposit from the linked bank account (`debitLinkedAccount`), and register the account with the custodian
    (`registerAccount`). If a step fails non-retryably, the completed steps are undone in reverse order
-   (`creditLinkedAccount` refund, then `closeInvestment`) and the final state starts with `Rolled back`. The
+   (`creditLinkedAccount` refund, then `removeInvestment`, which counts an account record that is already gone
+   as removed, so a retried compensation succeeds) and the final state starts with `Rolled back`. The
    transfer IDs make retried transfers idempotent. On success the state is `Complete`, and the Open Account
    Agent hands back to the Investment Agent.
 6. With the **Bug in workflow code** chaos flag on, the opening gets a `WELCOME-BONUS` promo code, and the
@@ -320,6 +335,10 @@ git checkout data/
 
 Ending the chat terminates any opening that is still running, because a child workflow is terminated when its
 parent closes.
+
+The chat workflow deletes its conversation history from Redis when it starts and again when it ends. The
+delete at the start matters when a chat workflow ID is used again after its workflow was terminated (which
+skips the delete at the end), so the new chat doesn't show the old history.
 
 ## Failure scenarios (chaos panel)
 
@@ -337,7 +356,7 @@ every flag off and clears the failure log.
 | LLM down | Turn on **Gemini API down** and send a message | The model call is an activity, so it is retried the same way (at most 10 seconds apart) and the conversation resumes where it was. |
 | LLM rate limited | Turn on **Gemini rate limited (429)** and send a message | The model activity fails with `nextRetryDelay: 15s`, which overrides the backoff like a Retry-After header: attempts are exactly 15 seconds apart. A real 429 from Gemini is handled the same way. |
 | Proactive rate limit | Restart the worker with `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh` and chat in several tabs | Model calls run on their own task queue (`TEMPORAL_TASK_QUEUE_LLM`, default `VAISupervisor-llm`), which the Temporal server rate limits across all workers. Calls queue up instead of failing. |
-| Business rule | Ask to open an account with $2,000,000 (over the $1,000,000 limit), under $100, or with the name of an account you already have | Validation fails once, non-retryably, and the agent explains why. No account opening is started. |
+| Business rule | Ask to open an account with $2,000,000 (over the $1,000,000 limit), or under $100 | Validation fails once, non-retryably, and the agent explains why. No account opening is started. |
 | Saga rollback | Turn on **Custodian rejects new accounts** (and **Slow account-opening steps**), then open an account through compliance approval. Without flags: as client 123, open an account with $300,000 (the linked bank account has $250,000) | Opening an account creates the account record, debits the linked bank account, then registers with the custodian. A non-retryable failure undoes the completed steps in reverse: refund, then remove the account. Transfers are idempotent, so a retried debit or refund never moves money twice. With slow steps on, you can kill the worker mid-rollback and it picks up where it left off. |
 | Bug in workflow code | Turn on **Bug in workflow code** and open an account through compliance approval | New openings get a `WELCOME-BONUS` promo code, and the workflow's promo code path has a real bug. The workflow *task* fails with a `TypeError` (`NullPointerException` in Java), and the workflow stays Running with all its state while other chats keep working. |
 
@@ -374,11 +393,11 @@ The worker, API and scripts read these (see `src/common/client-helper.ts` and `s
 | `TEMPORAL_API_KEY` | empty | API key auth for Temporal Cloud |
 | `TEMPORAL_TLS_CLIENT_CERT_PATH`, `TEMPORAL_TLS_CLIENT_KEY_PATH` | empty | mTLS auth for Temporal Cloud |
 | `TEMPORAL_TASK_QUEUE` | `VAISupervisor` | Task queue for the supervisor workflow, the activities and (by default) the Open Account workflow |
-| `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` | unset | Task queue for the Open Account workflow (the Java worker). Set by the worker start scripts' optional argument |
+| `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` | unset | Task queue for the Open Account workflow (the Java worker). Set by the worker start scripts' optional argument. When it differs from `TEMPORAL_TASK_QUEUE`, the TypeScript worker does not register the Open Account workflow |
 | `TEMPORAL_TASK_QUEUE_LLM` | `<TEMPORAL_TASK_QUEUE>-llm`, i.e. `VAISupervisor-llm` | Task queue for the model calls |
 | `LLM_MAX_CALLS_PER_SECOND` | unset (no limit) | Server-side rate limit for the model calls task queue, e.g. `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh` |
 | `REDIS_HOST`, `REDIS_PORT` | `localhost`, `6379` | Redis for chat history, chaos flags and claim check |
-| `USE_CLAIM_CHECK` | `false` | `true` turns on the claim-check codec (set in `setclaimcheck.sh`) |
+| `USE_CLAIM_CHECK` | `false` | `true`, `1` or `yes` (any case) turns on the claim-check codec (set in `setclaimcheck.sh`) |
 | `CODEC_SERVER_HOST`, `CODEC_SERVER_PORT` | `127.0.0.1`, `8081` | Codec server bind address |
 
 The API has its own settings (`API_HOST`, `API_PORT`); see the [API README](../../api/README.md).
@@ -394,7 +413,8 @@ npm test
 The tests run the workflows against a local Temporal test server, which is downloaded automatically on the
 first run, with stub activities and a scripted model (no Redis, Gemini key or worker needed). They cover the
 saga (happy path, rollback in reverse order, undoing only completed steps, transient retries), the promo-code
-bug pausing the workflow, starting only one opening per account, the KYC approval check, the business rules,
+bug pausing the workflow, a new opening (with its own KYC) each time the same account is opened, the KYC
+approval check, the business rules,
 idempotent transfers, the 429 handling, and the agent instructions (off-topic handling).
 
 The other test suites:
@@ -410,7 +430,7 @@ cd java
 ./gradlew test
 ```
 
-#### Live agent handoff test
+#### Live agent tests
 
 `npm test` uses a scripted model, so it can't check what the model decides to do. The live test runs the real
 chat workflow against Gemini: the customer asks about beneficiaries, gives client ID 123, then asks what
@@ -424,7 +444,14 @@ npm run test:live
 LIVE_TEST_RUNS=10 npm run test:live   # repeat the conversation, since model output varies
 ```
 
-Redis is optional for this test (without it, the chaos flags read as off).
+The second live test, `repeat-opening.live.ts`, runs the conversation "Who are my beneficiaries?", "123", "what
+investments do I have?", "Open Vacation with $13,000", "Yes", "Open Vacation with $13,000". The replies to
+both "Open Vacation" messages must show the client's details for KYC (Don, 123 Main Street), and two
+Open Account workflows must be started, ending `-Vacation-1` and `-Vacation-2`. It stubs the activities that
+would write `data/*.json`, use Redis or connect to another Temporal server.
+
+Redis is optional for the handoff test (without it, the chaos flags read as off); the repeat-opening test
+doesn't use it.
 
 ## Running the demo in Temporal Cloud
 
@@ -481,7 +508,7 @@ Cloud UI as described in [Send the Compliance Reviewed Signal](#send-the-complia
 
 ```shell
 cd src/temporal_supervisor
-./cloudsendcomplianceapproval.sh <Child Workflow ID>
+./cloudsendcomplianceapproval.sh "<Child Workflow ID>"
 ```
 
 Here are a few screenshots of the UX while opening a new account.
