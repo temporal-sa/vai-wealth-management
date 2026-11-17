@@ -101,8 +101,6 @@ class Runner {
       client_id: CLIENT_ID,
       account_name: accountName,
       initial_amount: this.amount ?? amount,
-      // No chat workflow to report the status to
-      parent_workflow_id: '',
       promo_code: null,
     };
     const handle = await this.client.workflow.start<typeof OpenInvestmentAccountWorkflow>(
@@ -135,7 +133,7 @@ class Runner {
     const details = await handle.executeUpdate<WealthManagementClient | null, []>('get_client_details');
     console.log(`The client details are ${JSON.stringify(details)}`);
 
-    const updated = await handle.executeUpdate<WealthManagementClient | null, [Partial<WealthManagementClient>]>(
+    const updated = await handle.executeUpdate<string, [Partial<WealthManagementClient>]>(
       'update_client_details',
       { args: [{ last_name: 'Doenut' }] },
     );

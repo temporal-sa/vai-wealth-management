@@ -1,0 +1,104 @@
+package io.temporal.demo.wealthmanagement.common;
+
+import io.temporal.api.cloud.cloudservice.v1.CloudServiceGrpc;
+import io.temporal.client.WorkflowClient;
+import io.temporal.client.WorkflowClientOptions;
+import io.temporal.common.converter.CodecDataConverter;
+import io.temporal.common.converter.DataConverter;
+import io.temporal.common.converter.DefaultDataConverter;
+import io.temporal.common.converter.GlobalDataConverter;
+import io.temporal.demo.wealthmanagement.claimcheck.ClaimCheckCodec;
+import io.temporal.payload.codec.PayloadCodec;
+import io.temporal.serviceclient.SimpleSslContextBuilder;
+import io.temporal.serviceclient.WorkflowServiceStubs;
+import io.temporal.serviceclient.WorkflowServiceStubsOptions;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.stereotype.Component;
+
+import jakarta.annotation.PostConstruct;
+import javax.net.ssl.SSLException;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
+import java.io.InputStream;
+import java.util.Collections;
+
+@Component
+public class TemporalClient {
+
+    @Autowired
+    private ClaimCheckCodec claimCheckCodec;
+
+    private static TemporalClient instance; // Not ideal
+
+    @PostConstruct()
+    public void init() {
+        System.out.println("TemporalClient Initialization complete.");
+        instance = this;
+    }
+
+    public static ClaimCheckCodec getClaimCheckCodec() {
+        return instance != null ? instance.claimCheckCodec : null;
+    }
+
+    public static WorkflowServiceStubs getWorkflowServiceStubs() throws FileNotFoundException, SSLException {
+        WorkflowServiceStubsOptions.Builder workflowServiceStubsOptionsBuilder =
+                WorkflowServiceStubsOptions.newBuilder();
+
+        if (!ServerInfo.getCertPath().equals("") && !"".equals(ServerInfo.getKeyPath())) {
+            // Handle mTLS certificates
+            InputStream clientCert = new FileInputStream(ServerInfo.getCertPath());
+            InputStream clientKey = new FileInputStream(ServerInfo.getKeyPath());
+            workflowServiceStubsOptionsBuilder.setSslContext(
+                    SimpleSslContextBuilder.forPKCS8(clientCert, clientKey).build()
+            );
+        }
+
+        String targetEndpoint = ServerInfo.getAddress();
+        workflowServiceStubsOptionsBuilder.setTarget(targetEndpoint);
+        WorkflowServiceStubs service = null;
+
+        if (!ServerInfo.getAddress().equals("localhost:7233")) {
+            // if not local server, then use the workflowServiceStubsOptionsBuilder
+            service = WorkflowServiceStubs.newServiceStubs(workflowServiceStubsOptionsBuilder.build());
+        } else {
+            service = WorkflowServiceStubs.newLocalServiceStubs();
+        }
+
+        return service;
+    }
+
+    /**
+     * A client for the namespace in TEMPORAL_NAMESPACE. WorkflowClient.newInstance(service)
+     * on its own always uses the "default" namespace, which does not exist on Temporal Cloud.
+     */
+    public static WorkflowClient newWorkflowClient(WorkflowServiceStubs service) {
+        ClaimCheckCodec codec = instance != null ? instance.claimCheckCodec : null;
+        return WorkflowClient.newInstance(service,
+                clientOptions(ServerInfo.getNamespace(), ServerInfo.useClaimCheck(), codec));
+    }
+
+    /**
+     * Options for the namespace, with the same claim check data converter as the Spring-configured
+     * worker client (claimcheck/TemporalOptionsConfig) when claim check is on. Without it, a signal
+     * sent with this client would carry the raw payload while the worker expects claim-checked data.
+     */
+    static WorkflowClientOptions clientOptions(String namespace, boolean useClaimCheck, PayloadCodec codec) {
+        WorkflowClientOptions.Builder builder = WorkflowClientOptions.newBuilder().setNamespace(namespace);
+        if (useClaimCheck) {
+            if (codec == null) {
+                throw new IllegalStateException(
+                        "USE_CLAIM_CHECK is true but no ClaimCheckCodec is available (Spring context not initialized)");
+            }
+            builder.setDataConverter(new CodecDataConverter(
+                    DefaultDataConverter.newDefaultInstance(), Collections.singletonList(codec)));
+        }
+        return builder.build();
+    }
+
+    public static WorkflowClient get() throws FileNotFoundException, SSLException {
+        System.out.println("<<<<SERVER INFO>>>>:\n " + ServerInfo.getServerInfo());
+        WorkflowServiceStubs service = getWorkflowServiceStubs();
+        return newWorkflowClient(service);
+    }
+
+}

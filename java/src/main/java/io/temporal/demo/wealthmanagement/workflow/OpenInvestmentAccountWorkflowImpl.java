@@ -1,81 +1,83 @@
 package io.temporal.demo.wealthmanagement.workflow;
 
 import io.temporal.activity.ActivityOptions;
-import io.temporal.common.RetryOptions;
+import io.temporal.demo.wealthmanagement.activities.UpdateParentWorkflow;
+import io.temporal.demo.wealthmanagement.common.RetryPolicies;
 import io.temporal.demo.wealthmanagement.common.ServerInfo;
+import io.temporal.demo.wealthmanagement.data.WealthManagementClient;
 import io.temporal.demo.wealthmanagement.model.InvestmentAccount;
-import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountOutput;
-import io.temporal.demo.wealthmanagement.model.UpdateAccountOpeningStateInput;
-import io.temporal.demo.wealthmanagement.model.WealthManagementClient;
 import io.temporal.failure.ActivityFailure;
 import io.temporal.failure.ApplicationFailure;
+import io.temporal.spring.boot.WorkflowImpl;
+import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
 import io.temporal.workflow.ActivityStub;
 import io.temporal.workflow.Saga;
 import io.temporal.workflow.Workflow;
 import org.slf4j.Logger;
 
 import java.time.Duration;
-import java.util.Locale;
+import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 
+@WorkflowImpl
 public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountWorkflow {
-    private static final Logger log = Workflow.getLogger(OpenInvestmentAccountWorkflowImpl.class);
-
     // Welcome-bonus promotion: a percentage of the initial deposit, up to MAX_BONUS.
     // *** Bug-In-Workflow-Code ***
     // Intentional bug for the "Bug in workflow code" demo: the promo code is "WELCOME-BONUS" (hyphen),
-    // but BONUS_RATES is keyed by "WELCOME_BONUS" (underscore), so the lookup in welcomeBonus returns
-    // null and unboxing it throws a NullPointerException.
-    // To fix it, uncomment the first line below and comment out the second. See README "Failure scenarios".
+    // but BONUS_RATES is keyed by "WELCOME_BONUS" (underscore), so the lookup in welcomeBonus returns null.
+    // To fix it, uncomment the first line below and comment out the second.
     // private static final Map<String, Double> BONUS_RATES = Map.of("WELCOME-BONUS", 0.01);
     private static final Map<String, Double> BONUS_RATES = Map.of("WELCOME_BONUS", 0.01);
     private static final double MAX_BONUS = 500.0;
 
-    // Matches TOOL_RETRY_POLICY in retry-policies.ts: retry until the dependency recovers,
-    // with a short maximum interval so recovery shows up within seconds.
-    private static final RetryOptions RETRY_OPTIONS = RetryOptions.newBuilder()
-            .setInitialInterval(Duration.ofSeconds(1))
-            .setBackoffCoefficient(2)
-            .setMaximumInterval(Duration.ofSeconds(5))
-            .build();
-
-    // The activities are implemented in TypeScript, so they are called by name on the TypeScript task queue.
-    // The start-to-close timeout bounds a single attempt only, so an outage is retried for as long as it lasts.
-    private final ActivityStub activities = Workflow.newUntypedActivityStub(
-            ActivityOptions.newBuilder()
-                    .setTaskQueue(ServerInfo.getTaskqueue())
-                    .setStartToCloseTimeout(Duration.ofSeconds(30))
-                    .setRetryOptions(RETRY_OPTIONS)
-                    .build());
-
-    private OpenInvestmentAccountInput input;
-    private String state = "Initializing";
+    private final Logger log = Workflow.getLogger(OpenInvestmentAccountWorkflowImpl.class);
+    private WealthManagementClient client;
+    private OpenInvestmentAccountInput inputs;
     private boolean initialized = false;
-    private boolean kycApproved = false;
-    private boolean complianceApproved = false;
-    private WealthManagementClient clientDetails;
+    private boolean kycVerified = false;
+    private boolean complianceReviewed = false;
+    private String currentState = "Initializing";
+
+    // The activities are implemented in Python, so they are called by name on the Python task queue.
+    // The start-to-close timeout bounds a single attempt only, so an outage is retried for as long as it lasts.
+    private final ActivityStub activityStub = Workflow.newUntypedActivityStub(
+            ActivityOptions.newBuilder().
+                    setTaskQueue(ServerInfo.getTaskqueue()).
+                    setStartToCloseTimeout(Duration.ofSeconds(30)).
+                    setRetryOptions(RetryPolicies.TOOL_RETRY_OPTIONS).build());
+
+    private final UpdateParentWorkflow updateParent = Workflow.newActivityStub(
+            UpdateParentWorkflow.class,
+            ActivityOptions.newBuilder().
+                    setTaskQueue(ServerInfo.getTaskqueueOpenAccount()).
+                    setStartToCloseTimeout(Duration.ofSeconds(5)).
+                    setRetryOptions(RetryPolicies.TOOL_RETRY_OPTIONS).build());
+
 
     @Override
-    public OpenInvestmentAccountOutput run(OpenInvestmentAccountInput input) {
-        this.input = input;
-        String accountName = input.accountName();
+    public OpenInvestmentAccountOutput run(OpenInvestmentAccountInput inputs) {
+        log.info("Started workflow {}", inputs);
+        this.inputs = inputs;
 
-        // Step 1: Load client details
-        log.info("OpenInvestmentAccountWorkflow started: {}", input);
-        clientDetails = activities.execute("getClient", WealthManagementClient.class, input.clientId());
-        initialized = true;
+        log.info("Retrieving current client information. Task queue is {}", ServerInfo.getTaskqueue());
+        this.client = activityStub.execute("get_client", WealthManagementClient.class, inputs.getClient_id());
+
+        log.info("Client {} details details {}", this.inputs.getClient_id(), this.client);
+        this.initialized = true;
         setState("Waiting KYC");
 
-        // Step 2: Wait for KYC approval
-        Workflow.await(() -> kycApproved);
+        // Wait until the user has validated their information is correct
+        log.info("Waiting for KYC Verification");
+        Workflow.await( () -> this.kycVerified );
+
         setState("Waiting Compliance Review");
 
-        // Step 3: Wait for compliance approval
-        Workflow.await(() -> complianceApproved);
-        setState("Compliance review has been approved. Creating Investment Account");
+        log.info("Waiting for Compliance Review");
+        Workflow.await( () -> this.complianceReviewed );
 
-        // Step 4: Create, fund and register the investment account
+        setState("Compliance review has been approved. Creating Investment Account");
         return openAccount();
     }
 
@@ -86,56 +88,62 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
      * error, the compensations run in reverse order. Transient failures never get here:
      * activities retry until they succeed.
      */
+    @SuppressWarnings("unchecked")
     private OpenInvestmentAccountOutput openAccount() {
-        String clientId = input.clientId();
-        String accountName = input.accountName();
-        double amount = input.initialAmount();
-        double bonus = input.promoCode() != null ? welcomeBonus(input.promoCode(), amount) : 0.0;
-        // Idempotency key: stable across activity retries and worker restarts. The chat gives every
-        // account opening its own workflow ID; the run ID keeps the key unique even if a workflow ID is
-        // ever used again (e.g. a workflow started on its own with an earlier ID), since a reused key
-        // would return the earlier transfer without moving any money.
-        String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId()
-                + "-initial-deposit";
+        String clientId = inputs.getClient_id();
+        double amount = inputs.getInitial_amount();
+        double bonus = inputs.getPromo_code() != null ? welcomeBonus(inputs) : 0.0;
+        // Idempotency key: stable across activity retries and worker restarts. The chat gives
+        // every account opening its own workflow ID, but the key also includes the run ID so that
+        // a workflow started again with the same ID (e.g. by hand, from the CLI or the scenario
+        // runner) can't look like a repeat of an earlier transfer.
+        String transferId = Workflow.getInfo().getWorkflowId() + "-" + Workflow.getInfo().getRunId() + "-initial-deposit";
 
         Saga saga = new Saga(new Saga.Options.Builder().setParallelCompensation(false).build());
         try {
             setState("Creating the account record.");
-            InvestmentAccount account = activities.execute("openInvestment", InvestmentAccount.class,
-                    clientId, accountName, amount + bonus);
+            InvestmentAccount newAccount = new InvestmentAccount(clientId, inputs.getAccount_name(), amount + bonus);
+            HashMap<String, Object> account = activityStub.execute("open_investment", HashMap.class, newAccount);
+            String investmentId = (String) account.get("investment_id");
             saga.addCompensation(() -> compensate("removing the account record",
-                    "removeInvestment", clientId, account.investmentId()));
+                    "remove_investment", clientId, investmentId));
 
-            setState(String.format("Transferring %s from the linked bank account.", formatUsd(amount)));
-            activities.execute("debitLinkedAccount", Map.class, clientId, amount, transferId);
-            saga.addCompensation(() -> compensate(
-                    String.format("refunding %s to the linked bank account", formatUsd(amount)),
-                    "creditLinkedAccount", clientId, amount, transferId + "-refund"));
+            setState(String.format("Transferring $%,.2f from the linked bank account.", amount));
+            activityStub.execute("debit_linked_account", HashMap.class, clientId, amount, transferId);
+            saga.addCompensation(() -> compensate(String.format("refunding $%,.2f to the linked bank account", amount),
+                    "credit_linked_account", clientId, amount, transferId + "-refund"));
 
             setState("Registering the account with the custodian.");
-            activities.execute("registerAccount", String.class, clientId, account.investmentId(), amount);
+            activityStub.execute("register_account", String.class, clientId, investmentId, amount);
         } catch (ActivityFailure e) {
             String reason = reason(e);
             setState("Failed: " + reason + ". Rolling back.");
             saga.compensate();
             setState("Rolled back. The account was not opened: " + reason + ".");
-            return new OpenInvestmentAccountOutput(false, "The account was not opened: " + reason);
+
+            OpenInvestmentAccountOutput result = new OpenInvestmentAccountOutput();
+            result.setAccount_created(false);
+            result.setMessage("The account was not opened: " + reason);
+            return result;
         }
 
-        log.info("Investment account {} opened successfully", accountName);
         setState("Complete");
-        return new OpenInvestmentAccountOutput(true, "investment account created");
+
+        OpenInvestmentAccountOutput result = new OpenInvestmentAccountOutput();
+        result.setAccount_created(true);
+        result.setMessage("investment account created");
+        return result;
     }
 
-    private static double welcomeBonus(String promoCode, double initialAmount) {
-        double rate = BONUS_RATES.get(promoCode);
-        return Math.min(initialAmount * rate, MAX_BONUS);
+    private static double welcomeBonus(OpenInvestmentAccountInput inputs) {
+        double rate = BONUS_RATES.get(inputs.getPromo_code());
+        return Math.min(inputs.getInitial_amount() * rate, MAX_BONUS);
     }
 
     private void compensate(String description, String activityName, Object... args) {
         setState("Rolling back: " + description + ".");
         // Compensations are activities too, so they are retried until they succeed
-        activities.execute(activityName, Object.class, args);
+        activityStub.execute(activityName, Object.class, args);
     }
 
     // The business reason for a non-retryable activity failure, such as the custodian rejecting the account
@@ -147,63 +155,50 @@ public class OpenInvestmentAccountWorkflowImpl implements OpenInvestmentAccountW
         return cause != null ? cause.getMessage() : e.getMessage();
     }
 
-    // Same format as formatUsd in open-account.ts, e.g. $1,000.00
-    private static String formatUsd(double amount) {
-        return String.format(Locale.US, "$%,.2f", amount);
+    @Override
+    public String get_current_state() {
+        return this.currentState;
     }
 
     @Override
-    public String getCurrentState() {
-        return state;
+    public WealthManagementClient get_client_details() {
+        // wait until we're initialized
+        Workflow.await(() -> this.initialized);
+        return this.client;
     }
 
     @Override
-    public WealthManagementClient getClientDetails() {
-        Workflow.await(() -> initialized);
-        return clientDetails;
-    }
-
-    // The customer corrected their details during KYC: save them, which also approves KYC
-    @Override
-    public WealthManagementClient updateClientDetails(Map<String, Object> fields) {
-        WealthManagementClient result = activities.execute("updateClient", WealthManagementClient.class,
-                input.clientId(), fields);
-        if (result != null) {
-            clientDetails = result;
-        }
-        kycApproved = true;
+    public String update_client_details(Map<String, Object> clientDetails) {
+        log.info("Updating client information for {}", this.inputs.getClient_id());
+        String result = activityStub.execute("update_client", String.class,
+                this.inputs.getClient_id(), clientDetails);
+        this.kycVerified = true;
         return result;
     }
 
-    // Each signal waits for the steps before it, so an early signal takes effect only once the workflow
-    // gets there: KYC once the client details are loaded, compliance once KYC is approved.
     @Override
-    public void verifyKyc() {
-        Workflow.await(() -> initialized);
-        log.info("KYC has been verified");
-        kycApproved = true;
+    public void verify_kyc() {
+        Workflow.await(() -> this.initialized);
+        this.kycVerified = true;
     }
 
     @Override
-    public void complianceApproved() {
-        Workflow.await(() -> initialized && kycApproved);
-        log.info("Compliance has been approved");
-        complianceApproved = true;
+    public void compliance_approved() {
+        Workflow.await(() -> this.initialized && this.kycVerified);
+        this.complianceReviewed = true;
     }
 
-    // Every state change is visible to the get_current_state query and reported to the parent, which
-    // keeps it for the agent's get_account_opening_status tool and shows it in the UI's status area. Signals are routed by workflow ID, not task queue, so this reaches the
-    // TypeScript supervisor even though it runs on a different task queue. Without a parent (the workflow
-    // was started on its own, e.g. by run_open_account_workflow.ts) there is no one to report to.
-    private void setState(String newState) {
-        state = newState;
-        log.info("State: {} for {}", newState, input.accountName());
-        String parentWorkflowId = input.parentWorkflowId();
-        if (parentWorkflowId == null || parentWorkflowId.isEmpty()) {
+    private void setState(String state) {
+        this.currentState = state;
+        updateParentState(state);
+    }
+
+    private void updateParentState(String state) {
+        Optional<String> parentWfId = Workflow.getInfo().getParentWorkflowId();
+        if (parentWfId.isEmpty()) {
             return;
         }
-        Workflow.newUntypedExternalWorkflowStub(parentWorkflowId)
-                .signal("update_account_opening_state", new UpdateAccountOpeningStateInput(
-                        input.accountName(), newState, Workflow.getInfo().getWorkflowId()));
+        // use an activity because the parent is on a different Task Queue
+        updateParent.changeState(parentWfId.get(), this.inputs.getAccount_name(), state, Workflow.getInfo().getWorkflowId());
     }
 }

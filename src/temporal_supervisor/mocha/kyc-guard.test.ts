@@ -18,7 +18,7 @@ import type {
   ProviderV3,
 } from '@ai-sdk/provider';
 import { KYC_NOT_APPROVED, kycApprovalRefusal } from '../workflows/agent-loop';
-import { validateNewAccount } from '../activities/investments';
+import { validate_new_account } from '../activities/investments';
 import type { ChatInteraction, WealthManagementClient } from '../shared';
 import { KycRecorderWorkflow, kycApprovedQuery, WealthManagementWorkflow } from './kyc-guard-workflows';
 
@@ -158,20 +158,24 @@ describe('KYC guard in the supervisor workflow', function () {
       plugins: [new AiSdkPlugin({ modelProvider: scriptedProvider(script, toolResults) })],
       bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
       activities: {
-        async getLlmTaskQueue() {
+        async get_llm_task_queue() {
           return TASK_QUEUE;
         },
-        async getCurrentClientInfo() {
+        async get_current_client_info() {
           return client;
         },
-        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+        // Through the test server instead of the configured Temporal server
+        async approve_kyc(childWorkflowId: string) {
+          await env.client.workflow.getHandle(childWorkflowId).signal('verify_kyc');
+        },
+        async append_chat_interaction(_workflowId: string, interaction: ChatInteraction) {
           interactions.push(interaction);
           return interactions.length;
         },
-        async appendStatusUpdate() {
+        async append_status_update() {
           return 0;
         },
-        async deleteConversation() {
+        async delete_conversation() {
           return true;
         },
       },
@@ -270,19 +274,19 @@ describe('account opening status in the supervisor workflow', function () {
       plugins: [new AiSdkPlugin({ modelProvider: scriptedProvider(script, toolResults) })],
       bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
       activities: {
-        async getLlmTaskQueue() {
+        async get_llm_task_queue() {
           return TASK_QUEUE;
         },
-        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+        async append_chat_interaction(_workflowId: string, interaction: ChatInteraction) {
           conversationCalls.push('appendChatInteraction');
           interactions.push(interaction);
           return interactions.length;
         },
-        async appendStatusUpdate(_workflowId: string, update: { status: string }) {
+        async append_status_update(_workflowId: string, update: { status: string }) {
           conversationCalls.push(`appendStatusUpdate:${update.status}`);
           return 0;
         },
-        async deleteConversation(workflowId: string) {
+        async delete_conversation(workflowId: string) {
           conversationCalls.push(`deleteConversation:${workflowId}`);
           return true;
         },
@@ -382,30 +386,33 @@ describe('opening the same account twice in a conversation', function () {
       plugins: [new AiSdkPlugin({ modelProvider: scriptedProvider(script, toolResults) })],
       bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
       activities: {
-        validateNewAccount,
-        async findPromotion() {
+        validate_new_account,
+        async find_promotion() {
           return null;
         },
-        async getOpenAccountTaskQueue() {
+        async get_open_account_task_queue() {
           return null; // the Open Account workflows run on this worker
         },
-        async getLlmTaskQueue() {
+        async get_llm_task_queue() {
           return TASK_QUEUE;
         },
-        async getClient() {
+        async get_client() {
           return client;
         },
-        async getCurrentClientInfo(childWorkflowId: string) {
+        async get_current_client_info(childWorkflowId: string) {
           return env.client.workflow.getHandle(childWorkflowId).executeUpdate('get_client_details');
         },
-        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+        async approve_kyc(childWorkflowId: string) {
+          await env.client.workflow.getHandle(childWorkflowId).signal('verify_kyc');
+        },
+        async append_chat_interaction(_workflowId: string, interaction: ChatInteraction) {
           interactions.push(interaction);
           return interactions.length;
         },
-        async appendStatusUpdate() {
+        async append_status_update() {
           return 0;
         },
-        async deleteConversation() {
+        async delete_conversation() {
           return true;
         },
       },

@@ -22,11 +22,11 @@ import type * as openAccountActivities from '../activities/open-account';
 import type { ModelMessage } from 'ai';
 import { runAgentTurn, AgentName } from './agent-loop';
 
-const { appendChatInteraction, appendStatusUpdate, deleteConversation } =
+const { append_chat_interaction, append_status_update, delete_conversation } =
   proxyActivities<typeof eventStreamActivities>({
     startToCloseTimeout: '30s',
   });
-const { getLlmTaskQueue } = proxyActivities<typeof openAccountActivities>({
+const { get_llm_task_queue } = proxyActivities<typeof openAccountActivities>({
   startToCloseTimeout: '30s',
 });
 
@@ -88,7 +88,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
 
   // The demo reuses chat workflow IDs (e.g. a chat started again after its workflow was terminated,
   // which skips the delete at the end), so clear any conversation left in Redis under this ID first.
-  await deleteConversation(workflowId);
+  await delete_conversation(workflowId);
 
   while (!done) {
     await condition(() => pendingMessages.length > 0 || pendingStatuses.length > 0 || done);
@@ -96,7 +96,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
     while (pendingStatuses.length > 0) {
       const statusUpdate: StatusUpdate = { status: pendingStatuses.shift()! };
       log.info('Processing status update', { status: statusUpdate.status });
-      await appendStatusUpdate(workflowId, statusUpdate);
+      await append_status_update(workflowId, statusUpdate);
     }
 
     while (pendingMessages.length > 0) {
@@ -104,7 +104,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
       log.info('Processing user message', { userInput: msg.user_input });
 
       // The model calls' task queue can be overridden on the worker (TEMPORAL_TASK_QUEUE_LLM)
-      llmTaskQueue ??= await getLlmTaskQueue();
+      llmTaskQueue ??= await get_llm_task_queue();
       turn += 1;
       const result = await runAgentTurn({
         workflowId,
@@ -128,7 +128,7 @@ export async function WealthManagementWorkflow(): Promise<void> {
       accountOpeningsStarted = result.accountOpeningsStarted;
       log.info('Agent turn complete', { clientId: result.clientId, agentTrace: result.interaction.agent_trace });
 
-      await appendChatInteraction(workflowId, result.interaction);
+      await append_chat_interaction(workflowId, result.interaction);
     }
 
     // TODO: Continue-As-New.
@@ -151,5 +151,5 @@ export async function WealthManagementWorkflow(): Promise<void> {
   }
 
   log.info('WealthManagementWorkflow ending', { workflowId });
-  await deleteConversation(workflowId);
+  await delete_conversation(workflowId);
 }

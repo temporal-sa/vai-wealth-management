@@ -24,12 +24,13 @@ export function openAccountWorkflowId(
  * Without a task queue the child runs on the caller's; with one it can run in Java.
  */
 export async function startOpenAccount(
+  chatWorkflowId: string,
   input: OpenInvestmentAccountInput,
   openingNumber: number,
   taskQueue?: string,
 ): Promise<string> {
   const childWorkflowId = openAccountWorkflowId(
-    input.parent_workflow_id,
+    chatWorkflowId,
     input.client_id,
     input.account_name,
     openingNumber,

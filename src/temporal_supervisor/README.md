@@ -179,7 +179,7 @@ cd src/temporal_supervisor
 ./startlocalworker.sh
 ```
 
-The worker polls the `VAISupervisor` task queue, and runs the model calls on `VAISupervisor-llm`
+The worker polls the `Supervisor` task queue, and runs the model calls on `Supervisor-llm`
 (see [Environment variables](#environment-variables)).
 
 ### Run the Open Account workflow in Java (optional)
@@ -273,7 +273,7 @@ src/temporal_supervisor/startlocalopenaccount.sh
 ```
 
 With a task queue name, the workflow runs on that queue, so you can run the same scenarios against the Java
-workflow (start `java/startlocalworker.sh <queue>` first):
+workflow (start the Java worker first: `cd java && ./startlocalworker.sh <queue>`):
 
 ```shell
 src/temporal_supervisor/startlocalopenaccount.sh OpenAccount
@@ -299,7 +299,7 @@ git checkout data/
 
 1. The Investment Agent hands off to the Open Account Agent, which calls the `open_new_investment_account`
    tool with the client ID, account name and initial amount. The tool first checks the business rules
-   (`validateNewAccount`: a deposit from $100 to $1,000,000). If one is broken, the agent explains why and no workflow is started. Otherwise it starts the
+   (`validate_new_account`: a deposit from $100 to $1,000,000). If one is broken, the agent explains why and no workflow is started. Otherwise it starts the
    `OpenInvestmentAccountWorkflow` child workflow
    ([workflows/start-open-account.ts](workflows/start-open-account.ts)) on the supervisor's task queue, or on
    `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` when the [Java worker](../../java/README.md) runs it, and returns the
@@ -322,10 +322,10 @@ git checkout data/
    send with `localsendcomplianceapproval.sh` / `cloudsendcomplianceapproval.sh "<Child Workflow ID>"`. The
    signal handlers wait for the steps before them: `verify_kyc` takes effect once the client details are
    loaded, and `compliance_approved` once KYC is approved, so an early signal is not lost or applied out of order.
-5. The account is then opened as a saga: create the account record (`openInvestment`), transfer the initial
-   deposit from the linked bank account (`debitLinkedAccount`), and register the account with the custodian
-   (`registerAccount`). If a step fails non-retryably, the completed steps are undone in reverse order
-   (`creditLinkedAccount` refund, then `removeInvestment`, which counts an account record that is already gone
+5. The account is then opened as a saga: create the account record (`open_investment`), transfer the initial
+   deposit from the linked bank account (`debit_linked_account`), and register the account with the custodian
+   (`register_account`). If a step fails non-retryably, the completed steps are undone in reverse order
+   (`credit_linked_account` refund, then `remove_investment`, which counts an account record that is already gone
    as removed, so a retried compensation succeeds) and the final state starts with `Rolled back`. The
    transfer IDs make retried transfers idempotent. On success the state is `Complete`, and the Open Account
    Agent hands back to the Investment Agent.
@@ -355,7 +355,7 @@ every flag off and clears the failure log.
 | Tool / API down | Turn on **Core banking API down**, ask to list your investments, wait, turn it off | The investment and beneficiary activities fail with a connection error and are retried (at most 5 seconds apart) until the switch is off. The agent waits mid-turn; nothing is lost or re-asked. |
 | LLM down | Turn on **Gemini API down** and send a message | The model call is an activity, so it is retried the same way (at most 10 seconds apart) and the conversation resumes where it was. |
 | LLM rate limited | Turn on **Gemini rate limited (429)** and send a message | The model activity fails with `nextRetryDelay: 15s`, which overrides the backoff like a Retry-After header: attempts are exactly 15 seconds apart. A real 429 from Gemini is handled the same way. |
-| Proactive rate limit | Restart the worker with `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh` and chat in several tabs | Model calls run on their own task queue (`TEMPORAL_TASK_QUEUE_LLM`, default `VAISupervisor-llm`), which the Temporal server rate limits across all workers. Calls queue up instead of failing. |
+| Proactive rate limit | Restart the worker with `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh` and chat in several tabs | Model calls run on their own task queue (`TEMPORAL_TASK_QUEUE_LLM`, default `Supervisor-llm`), which the Temporal server rate limits across all workers. Calls queue up instead of failing. |
 | Business rule | Ask to open an account with $2,000,000 (over the $1,000,000 limit), or under $100 | Validation fails once, non-retryably, and the agent explains why. No account opening is started. |
 | Saga rollback | Turn on **Custodian rejects new accounts** (and **Slow account-opening steps**), then open an account through compliance approval. Without flags: as client 123, open an account with $300,000 (the linked bank account has $250,000) | Opening an account creates the account record, debits the linked bank account, then registers with the custodian. A non-retryable failure undoes the completed steps in reverse: refund, then remove the account. Transfers are idempotent, so a retried debit or refund never moves money twice. With slow steps on, you can kill the worker mid-rollback and it picks up where it left off. |
 | Bug in workflow code | Turn on **Bug in workflow code** and open an account through compliance approval | New openings get a `WELCOME-BONUS` promo code, and the workflow's promo code path has a real bug. The workflow *task* fails with a `TypeError` (`NullPointerException` in Java), and the workflow stays Running with all its state while other chats keep working. |
@@ -392,9 +392,9 @@ The worker, API and scripts read these (see `src/common/client-helper.ts` and `s
 | `TEMPORAL_NAMESPACE` | `default` | Namespace |
 | `TEMPORAL_API_KEY` | empty | API key auth for Temporal Cloud |
 | `TEMPORAL_TLS_CLIENT_CERT_PATH`, `TEMPORAL_TLS_CLIENT_KEY_PATH` | empty | mTLS auth for Temporal Cloud |
-| `TEMPORAL_TASK_QUEUE` | `VAISupervisor` | Task queue for the supervisor workflow, the activities and (by default) the Open Account workflow |
+| `TEMPORAL_TASK_QUEUE` | `Supervisor` | Task queue for the supervisor workflow, the activities and (by default) the Open Account workflow |
 | `TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT` | unset | Task queue for the Open Account workflow (the Java worker). Set by the worker start scripts' optional argument. When it differs from `TEMPORAL_TASK_QUEUE`, the TypeScript worker does not register the Open Account workflow |
-| `TEMPORAL_TASK_QUEUE_LLM` | `<TEMPORAL_TASK_QUEUE>-llm`, i.e. `VAISupervisor-llm` | Task queue for the model calls |
+| `TEMPORAL_TASK_QUEUE_LLM` | `<TEMPORAL_TASK_QUEUE>-llm`, i.e. `Supervisor-llm` | Task queue for the model calls |
 | `LLM_MAX_CALLS_PER_SECOND` | unset (no limit) | Server-side rate limit for the model calls task queue, e.g. `LLM_MAX_CALLS_PER_SECOND=0.2 ./startlocalworker.sh` |
 | `REDIS_HOST`, `REDIS_PORT` | `localhost`, `6379` | Redis for chat history, chaos flags and claim check |
 | `USE_CLAIM_CHECK` | `false` | `true`, `1` or `yes` (any case) turns on the claim-check codec (set in `setclaimcheck.sh`) |
