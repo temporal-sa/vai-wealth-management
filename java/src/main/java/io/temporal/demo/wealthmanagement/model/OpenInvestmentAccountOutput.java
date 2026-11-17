@@ -1,9 +1,11 @@
 package io.temporal.demo.wealthmanagement.model;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
 
-// Matches OpenInvestmentAccountOutput in src/temporal_supervisor/shared.ts
-public record OpenInvestmentAccountOutput(
-        @JsonProperty("account_created") boolean accountCreated,
-        String message) {
+@Getter
+@Setter
+public class OpenInvestmentAccountOutput {
+    private boolean account_created;
+    private String message;
 }

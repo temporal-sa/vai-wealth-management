@@ -1,14 +1,14 @@
 package io.temporal.demo.wealthmanagement.model;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.Getter;
+import lombok.Setter;
 
-// Matches OpenInvestmentAccountInput in src/temporal_supervisor/shared.ts
-public record OpenInvestmentAccountInput(
-        @JsonProperty("client_id") String clientId,
-        @JsonProperty("account_name") String accountName,
-        @JsonProperty("initial_amount") double initialAmount,
-        // The supervisor workflow that receives the status updates; empty when the workflow is started on its own
-        @JsonProperty("parent_workflow_id") String parentWorkflowId,
-        // Set when a promotion is running for the new account (e.g. "WELCOME-BONUS")
-        @JsonProperty("promo_code") String promoCode) {
+@Setter
+@Getter
+public class OpenInvestmentAccountInput {
+    private String client_id;
+    private String account_name;
+    private float initial_amount;
+    // Set when a promotion is running for the new account (e.g. "WELCOME-BONUS")
+    private String promo_code;
 }

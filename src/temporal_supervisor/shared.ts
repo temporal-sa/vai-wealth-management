@@ -1,4 +1,5 @@
-export const TASK_QUEUE_NAME = 'VAISupervisor';
+// The reference port's default task queue, so the shared scripts and the Java worker find the activities
+export const TASK_QUEUE_NAME = 'Supervisor';
 
 // Model calls run on their own task queue, so the server can rate limit them across all workers.
 // This is the default name; TEMPORAL_TASK_QUEUE_LLM overrides it (see ClientHelper.taskQueueLLM).
@@ -48,9 +49,6 @@ export interface OpenInvestmentAccountInput {
   client_id: string;
   account_name: string;
   initial_amount: number;
-  // The chat (supervisor) workflow that receives the status updates. Empty when the workflow is
-  // started on its own, as run_open_account_workflow.ts does; the status updates are then skipped.
-  parent_workflow_id: string;
   // Set when a promotion is running for the new account (e.g. "WELCOME-BONUS")
   promo_code?: string | null;
 }

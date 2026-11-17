@@ -26,10 +26,10 @@ import type * as custodianActivities from '../activities/custodian';
 
 // One attempt may take 30 seconds; an outage is retried for as long as it lasts
 const activityOptions = { startToCloseTimeout: '30s', retry: TOOL_RETRY_POLICY } as const;
-const { getClient, updateClient } = proxyActivities<typeof clientActivities>(activityOptions);
-const { openInvestment, removeInvestment } = proxyActivities<typeof investmentActivities>(activityOptions);
-const { debitLinkedAccount, creditLinkedAccount } = proxyActivities<typeof fundingActivities>(activityOptions);
-const { registerAccount } = proxyActivities<typeof custodianActivities>(activityOptions);
+const { get_client, update_client } = proxyActivities<typeof clientActivities>(activityOptions);
+const { open_investment, remove_investment } = proxyActivities<typeof investmentActivities>(activityOptions);
+const { debit_linked_account, credit_linked_account } = proxyActivities<typeof fundingActivities>(activityOptions);
+const { register_account } = proxyActivities<typeof custodianActivities>(activityOptions);
 
 
 interface Promotion {
@@ -64,7 +64,7 @@ const getCurrentStateQuery = defineQuery<string>('get_current_state');
 // An update rather than a query, so a caller that asks right after starting the workflow waits
 // until the client details have been loaded instead of getting null
 const getClientDetailsUpdate = defineUpdate<WealthManagementClient | null>('get_client_details');
-const updateClientDetailsUpdate = defineUpdate<WealthManagementClient | null, [Partial<WealthManagementClient>]>(
+const updateClientDetailsUpdate = defineUpdate<string, [Partial<WealthManagementClient>]>(
   'update_client_details',
 );
 
@@ -81,7 +81,7 @@ export async function OpenInvestmentAccountWorkflow(
   let complianceApproved = false;
   let clientDetails: WealthManagementClient | null = null;
 
-  const { client_id, account_name, initial_amount, parent_workflow_id, promo_code } = input;
+  const { client_id, account_name, initial_amount, promo_code } = input;
 
   // Every state change is visible to the get_current_state query and reported to the parent, which
   // keeps it for the agent's get_account_opening_status tool and shows it in the UI's status area. Signals are routed by workflow ID, so this reaches the parent
@@ -90,13 +90,14 @@ export async function OpenInvestmentAccountWorkflow(
   async function setState(newState: string) {
     state = newState;
     log.info(`State: ${newState}`, { account_name });
-    if (!parent_workflow_id) return;
+    const parent = workflowInfo().parent;
+    if (!parent) return;
     const update: UpdateAccountOpeningStateInput = {
       account_name,
       state: newState,
       workflow_id: workflowInfo().workflowId,
     };
-    await getExternalWorkflowHandle(parent_workflow_id).signal(UPDATE_ACCOUNT_OPENING_STATE_SIGNAL, update);
+    await getExternalWorkflowHandle(parent.workflowId).signal(UPDATE_ACCOUNT_OPENING_STATE_SIGNAL, update);
   }
 
   // Query handlers
@@ -122,15 +123,15 @@ export async function OpenInvestmentAccountWorkflow(
   });
   // The customer corrected their details during KYC: save them, which also approves KYC
   setHandler(updateClientDetailsUpdate, async (fields: Partial<WealthManagementClient>) => {
-    const result = await updateClient(client_id, fields);
-    if (result) clientDetails = result;
+    const result = await update_client(client_id, fields);
+    if (clientDetails) clientDetails = { ...clientDetails, ...fields };
     kycApproved = true;
     return result;
   });
 
   // Step 1: Load client details
   log.info('OpenInvestmentAccountWorkflow started', { client_id, account_name, initial_amount, promo_code });
-  clientDetails = await getClient(client_id);
+  clientDetails = await get_client(client_id);
   initialized = true;
   await setState('Waiting KYC');
 
@@ -156,21 +157,21 @@ export async function OpenInvestmentAccountWorkflow(
   const compensations: Array<{ description: string; undo: () => Promise<unknown> }> = [];
   try {
     await setState('Creating the account record.');
-    const account = await openInvestment(client_id, account_name, initial_amount + bonus);
+    const account = await open_investment({ client_id, name: account_name, balance: initial_amount + bonus });
     compensations.unshift({
       description: 'removing the account record',
-      undo: () => removeInvestment(client_id, account.investment_id),
+      undo: () => remove_investment(client_id, account.investment_id),
     });
 
     await setState(`Transferring ${formatUsd(initial_amount)} from the linked bank account.`);
-    await debitLinkedAccount(client_id, initial_amount, transferId);
+    await debit_linked_account(client_id, initial_amount, transferId);
     compensations.unshift({
       description: `refunding ${formatUsd(initial_amount)} to the linked bank account`,
-      undo: () => creditLinkedAccount(client_id, initial_amount, `${transferId}-refund`),
+      undo: () => credit_linked_account(client_id, initial_amount, `${transferId}-refund`),
     });
 
     await setState('Registering the account with the custodian.');
-    await registerAccount(client_id, account.investment_id, initial_amount);
+    await register_account(client_id, account.investment_id, initial_amount);
   } catch (err) {
     if (!(err instanceof ActivityFailure)) throw err;
     const reason = failureReason(err);

@@ -5,7 +5,7 @@
 # scenarios finish.
 # Usage: startlocalopenaccount.sh [open-account-task-queue] [run_open_account_workflow.ts args]
 # With a task queue name, the workflow runs on that queue: start the Java worker with the same
-# name first (java/startlocalworker.sh <queue>).
+# name first (cd java && ./startlocalworker.sh <queue>).
 # Extra arguments after the queue go to run_open_account_workflow.ts
 # (e.g. --scenario 1 --amount 300000).
 cd "$(dirname "$0")/../.." || exit 1

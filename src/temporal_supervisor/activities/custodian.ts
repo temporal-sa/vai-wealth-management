@@ -3,7 +3,7 @@ import { ChaosFlag } from '../../common/chaos-manager';
 import { injectFailure, maybeSlowDown } from '../chaos';
 
 /** Register a new investment account with the third-party custodian that holds its assets. Returns its reference. */
-export async function registerAccount(_clientId: string, investmentId: string, _amount: number): Promise<string> {
+export async function register_account(_clientId: string, investmentId: string, _amount: number): Promise<string> {
   await maybeSlowDown();
   await injectFailure(
     ChaosFlag.CUSTODIAN_REJECTS,

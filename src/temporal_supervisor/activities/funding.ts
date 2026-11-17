@@ -8,7 +8,7 @@ import { maybeSlowDown } from '../chaos';
 const mgr = new FundingManager();
 
 /** Transfer the initial deposit out of the client's linked bank account. */
-export async function debitLinkedAccount(clientId: string, amount: number, transferId: string): Promise<Transfer> {
+export async function debit_linked_account(clientId: string, amount: number, transferId: string): Promise<Transfer> {
   await maybeSlowDown();
   try {
     return mgr.debit(clientId, amount, transferId);
@@ -22,7 +22,7 @@ export async function debitLinkedAccount(clientId: string, amount: number, trans
 }
 
 /** Refund money to the client's linked bank account (saga compensation). */
-export async function creditLinkedAccount(clientId: string, amount: number, transferId: string): Promise<Transfer> {
+export async function credit_linked_account(clientId: string, amount: number, transferId: string): Promise<Transfer> {
   await maybeSlowDown();
   return mgr.credit(clientId, amount, transferId);
 }

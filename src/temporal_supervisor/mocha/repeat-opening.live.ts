@@ -23,7 +23,7 @@ import { AiSdkPlugin } from '@temporalio/ai-sdk';
 import { google } from '@ai-sdk/google';
 import { BeneficiariesManager } from '../../common/beneficiaries-manager';
 import { InvestmentManager } from '../../common/investment-manager';
-import { getClient, validateNewAccount } from '../activities/activities';
+import { get_client, validate_new_account } from '../activities/activities';
 import type { ChatInteraction, WealthManagementClient } from '../shared';
 import { WealthManagementWorkflow } from '../workflows/wealth-management';
 
@@ -67,49 +67,52 @@ describe('Opening the same account twice (live Gemini)', function () {
       bundlerOptions: { ignoreModules: ['@temporalio/activity', '@temporalio/client', 'crypto'] },
       activities: {
         // Read data/*.json, without the chaos flags (Redis)
-        async listBeneficiaries(clientId: string) {
+        async list_beneficiaries(clientId: string) {
           return beneficiaries.listBeneficiaries(clientId);
         },
-        async listInvestments(clientId: string) {
+        async list_investments(clientId: string) {
           return investments.listInvestmentAccounts(clientId);
         },
-        validateNewAccount,
-        async findPromotion() {
+        validate_new_account,
+        async find_promotion() {
           return null; // chaos off: no promo-code bug
         },
-        getClient,
+        get_client,
         // The Open Account workflows run on this worker, and the model calls too
-        async getOpenAccountTaskQueue() {
+        async get_open_account_task_queue() {
           return null;
         },
-        async getLlmTaskQueue() {
+        async get_llm_task_queue() {
           return TASK_QUEUE;
         },
         // Through the test server instead of the configured Temporal server
-        async getCurrentClientInfo(childWorkflowId: string): Promise<WealthManagementClient | null> {
+        async get_current_client_info(childWorkflowId: string): Promise<WealthManagementClient | null> {
           return env.client.workflow.getHandle(childWorkflowId).executeUpdate('get_client_details');
         },
+        async approve_kyc(childWorkflowId: string) {
+          await env.client.workflow.getHandle(childWorkflowId).signal('verify_kyc');
+        },
         // The conversation kept in memory instead of Redis
-        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+        async append_chat_interaction(_workflowId: string, interaction: ChatInteraction) {
           interactions.push(interaction);
           return interactions.length;
         },
-        async appendStatusUpdate() {
+        async append_status_update() {
           return 0;
         },
-        async deleteConversation() {
+        async delete_conversation() {
           return true;
         },
-        addBeneficiary: mustNotRun('addBeneficiary'),
-        deleteBeneficiary: mustNotRun('deleteBeneficiary'),
-        closeInvestment: mustNotRun('closeInvestment'),
-        updateClientDetails: mustNotRun('updateClientDetails'),
-        updateClient: mustNotRun('updateClient'),
-        openInvestment: mustNotRun('openInvestment'),
-        removeInvestment: mustNotRun('removeInvestment'),
-        debitLinkedAccount: mustNotRun('debitLinkedAccount'),
-        creditLinkedAccount: mustNotRun('creditLinkedAccount'),
-        registerAccount: mustNotRun('registerAccount'),
+        add_beneficiary: mustNotRun('add_beneficiary'),
+        delete_beneficiary: mustNotRun('delete_beneficiary'),
+        close_investment: mustNotRun('close_investment'),
+        update_client_details: mustNotRun('update_client_details'),
+        update_client: mustNotRun('update_client'),
+        open_investment: mustNotRun('open_investment'),
+        remove_investment: mustNotRun('remove_investment'),
+        debit_linked_account: mustNotRun('debit_linked_account'),
+        credit_linked_account: mustNotRun('credit_linked_account'),
+        register_account: mustNotRun('register_account'),
       },
     });
 

@@ -4,7 +4,6 @@
 import { TemporalProvider } from '@temporalio/ai-sdk';
 import {
   proxyActivities,
-  getExternalWorkflowHandle,
   log,
   ActivityFailure,
   ApplicationFailure,
@@ -141,7 +140,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`list_beneficiaries(${client_id})`);
-        return beneficiariesActs.listBeneficiaries(client_id);
+        return beneficiariesActs.list_beneficiaries(client_id);
       },
     }),
     add_beneficiary: tool({
@@ -153,7 +152,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, first_name, last_name, relationship }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`add_beneficiary(${client_id}, ${first_name} ${last_name})`);
-        return beneficiariesActs.addBeneficiary(client_id, first_name, last_name, relationship);
+        return beneficiariesActs.add_beneficiary({ client_id, first_name, last_name, relationship });
       },
     }),
     delete_beneficiary: tool({
@@ -162,7 +161,7 @@ function buildBeneficiaryTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, beneficiary_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`delete_beneficiary(${client_id}, ${beneficiary_id})`);
-        return beneficiariesActs.deleteBeneficiary(client_id, beneficiary_id);
+        return beneficiariesActs.delete_beneficiary(client_id, beneficiary_id);
       },
     }),
   };
@@ -176,7 +175,7 @@ function buildInvestmentTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`list_investments(${client_id})`);
-        return investmentActs.listInvestments(client_id);
+        return investmentActs.list_investments(client_id);
       },
     }),
     close_investment: tool({
@@ -185,7 +184,7 @@ function buildInvestmentTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, investment_id }) => {
         ctx.clientContext.clientId = client_id;
         ctx.traceLines.push(`close_investment(${client_id}, ${investment_id})`);
-        return investmentActs.closeInvestment(client_id, investment_id);
+        return investmentActs.close_investment(client_id, investment_id);
       },
     }),
   };
@@ -206,28 +205,27 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       execute: async ({ client_id, account_name, initial_amount }) => {
         ctx.clientContext.clientId = client_id;
         try {
-          await investmentActs.validateNewAccount(client_id, account_name, initial_amount);
+          await investmentActs.validate_new_account(client_id, account_name, initial_amount);
         } catch (err) {
           const reason = businessRuleReason(err);
           if (reason === undefined) throw err;
           ctx.traceLines.push(`open_new_investment_account(${client_id}, ${account_name}, ${initial_amount}) → rejected: ${reason}`);
           return { message: `The account cannot be opened: ${reason}` };
         }
-        const promo_code = await investmentActs.findPromotion(client_id);
+        const promo_code = await investmentActs.find_promotion(client_id);
         const workflowInput: OpenInvestmentAccountInput = {
           client_id,
           account_name,
           initial_amount,
-          parent_workflow_id: ctx.parentWorkflowId,
           promo_code,
         };
-        const taskQueue = (await openAccountActs.getOpenAccountTaskQueue()) ?? undefined;
+        const taskQueue = (await openAccountActs.get_open_account_task_queue()) ?? undefined;
         // Take the next opening number with no await in between, so two calls in the same model
         // step can't get the same one. Give it back if the opening couldn't be started.
         const openingNumber = ++ctx.accountOpeningsStarted;
         let childWorkflowId: string;
         try {
-          childWorkflowId = await startOpenAccount(workflowInput, openingNumber, taskQueue);
+          childWorkflowId = await startOpenAccount(ctx.parentWorkflowId, workflowInput, openingNumber, taskQueue);
         } catch (err) {
           if (ctx.accountOpeningsStarted === openingNumber) ctx.accountOpeningsStarted -= 1;
           throw err;
@@ -245,7 +243,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       inputSchema: z.object({ child_workflow_id: z.string() }),
       execute: async ({ child_workflow_id }) => {
         ctx.traceLines.push(`get_current_client_info(${child_workflow_id})`);
-        const client = await openAccountActs.getCurrentClientInfo(child_workflow_id);
+        const client = await openAccountActs.get_current_client_info(child_workflow_id);
         ctx.kycDetailsShownTurn[child_workflow_id] = ctx.turn;
         return client;
       },
@@ -259,8 +257,8 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
       }),
       execute: async ({ child_workflow_id, fields }) => {
         ctx.traceLines.push(`update_client_details(${child_workflow_id})`);
-        const client = await openAccountActs.updateClientDetails(child_workflow_id, fields);
-        return { message: 'Client details updated and KYC approved.', client };
+        const result = await openAccountActs.update_client_details(child_workflow_id, fields);
+        return { message: `${result}. KYC approved.` };
       },
     }),
     approve_kyc: tool({
@@ -274,7 +272,7 @@ function buildOpenAccountTools(ctx: AgentRunContext): ToolSet {
           return refusal;
         }
         ctx.traceLines.push(`approve_kyc(${child_workflow_id})`);
-        await getExternalWorkflowHandle(child_workflow_id).signal('verify_kyc');
+        await openAccountActs.approve_kyc(child_workflow_id);
         return 'KYC approved. The account is now waiting for compliance review.';
       },
     }),

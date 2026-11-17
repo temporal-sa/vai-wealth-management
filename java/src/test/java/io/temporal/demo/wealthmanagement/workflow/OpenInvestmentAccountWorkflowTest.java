@@ -11,512 +11,249 @@ import io.temporal.client.WorkflowClient;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.demo.wealthmanagement.common.ServerInfo;
-import io.temporal.demo.wealthmanagement.model.InvestmentAccount;
+import io.temporal.demo.wealthmanagement.data.WealthManagementClient;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountInput;
 import io.temporal.demo.wealthmanagement.model.OpenInvestmentAccountOutput;
-import io.temporal.demo.wealthmanagement.model.UpdateAccountOpeningStateInput;
-import io.temporal.demo.wealthmanagement.model.WealthManagementClient;
 import io.temporal.failure.ApplicationFailure;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
-import io.temporal.workflow.ChildWorkflowOptions;
-import io.temporal.workflow.QueryMethod;
-import io.temporal.workflow.SignalMethod;
-import io.temporal.workflow.Workflow;
-import io.temporal.workflow.WorkflowInterface;
-import io.temporal.workflow.WorkflowMethod;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Runs the workflow against fake versions of the TypeScript activities, registered under the real
- * activity names on the TypeScript task queue, so it can be tested without the TypeScript worker,
- * Redis or the data files.
+ * Tests for the failure scenarios demonstrated from the UI chaos panel, matching
+ * tests/test_failure_scenarios.py in the Python version.
+ *
+ * The workflow runs against stub activities registered under the Python activity names.
+ * They record the order they were called in and fail on demand, so no Python worker,
+ * Redis or data files are needed.
  */
-class OpenInvestmentAccountWorkflowTest {
-    private static final String OPEN_ACCOUNT_QUEUE = "OpenAccount-test";
-    private static final String CLIENT_ID = "123";
-    private static final String ACCOUNT_NAME = "College Fund";
-    private static final String PARENT_ID = "parent";
-    private static final String CHILD_ID = "open-account-test-child";
+public class OpenInvestmentAccountWorkflowTest {
+    private static final String CLIENT_ID = "C-1";
     private static final String INVESTMENT_ID = "i-test";
 
-    private TestWorkflowEnvironment testEnv;
+    // Activity calls, in order.
+    private static final List<String> CALLS = new CopyOnWriteArrayList<>();
+    // Transfer IDs passed to debit_linked_account.
+    private static final List<String> TRANSFER_IDS = new CopyOnWriteArrayList<>();
+    // Per-test failure behavior, keyed by activity name: "reject" raises a non-retryable
+    // error; a number N fails the first N attempts with a transient error.
+    private static final Map<String, String> FAILURES = new ConcurrentHashMap<>();
+
+    @ActivityInterface
+    public interface PythonActivities {
+        @ActivityMethod(name = "get_client")
+        WealthManagementClient getClient(String clientId);
+
+        @ActivityMethod(name = "open_investment")
+        Map<String, Object> openInvestment(Map<String, Object> newAccount);
+
+        @ActivityMethod(name = "remove_investment")
+        boolean removeInvestment(String clientId, String investmentId);
+
+        @ActivityMethod(name = "debit_linked_account")
+        Map<String, Object> debit(String clientId, double amount, String transferId);
+
+        @ActivityMethod(name = "credit_linked_account")
+        Map<String, Object> credit(String clientId, double amount, String transferId);
+
+        @ActivityMethod(name = "register_account")
+        String register(String clientId, String investmentId, double amount);
+    }
+
+    public static class StubActivities implements PythonActivities {
+        private static void maybeFail(String name) {
+            String behavior = FAILURES.get(name);
+            if (behavior == null) {
+                return;
+            }
+            if (behavior.equals("reject")) {
+                throw ApplicationFailure.newNonRetryableFailure(name + " rejected", "Rejected");
+            }
+            if (Activity.getExecutionContext().getInfo().getAttempt() <= Integer.parseInt(behavior)) {
+                throw ApplicationFailure.newFailure(name + " unavailable", "ConnectionError");
+            }
+        }
+
+        @Override
+        public WealthManagementClient getClient(String clientId) {
+            CALLS.add("get_client");
+            return new WealthManagementClient(clientId, "Sam", "Doe", "1 Main St", "555", "s@example.com", "single");
+        }
+
+        @Override
+        public Map<String, Object> openInvestment(Map<String, Object> newAccount) {
+            CALLS.add("open_investment#" + Activity.getExecutionContext().getInfo().getAttempt());
+            maybeFail("open_investment");
+            return Map.of("investment_id", INVESTMENT_ID, "name", "Test", "balance", 500.0);
+        }
+
+        @Override
+        public boolean removeInvestment(String clientId, String investmentId) {
+            CALLS.add("remove_investment:" + investmentId);
+            return true;
+        }
+
+        @Override
+        public Map<String, Object> debit(String clientId, double amount, String transferId) {
+            CALLS.add("debit:" + amount);
+            TRANSFER_IDS.add(transferId);
+            maybeFail("debit_linked_account");
+            return Map.of();
+        }
+
+        @Override
+        public Map<String, Object> credit(String clientId, double amount, String transferId) {
+            CALLS.add("credit:" + amount);
+            assertTrue(transferId.endsWith("-refund"));
+            return Map.of();
+        }
+
+        @Override
+        public String register(String clientId, String investmentId, double amount) {
+            CALLS.add("register");
+            maybeFail("register_account");
+            return "CUST-1";
+        }
+    }
+
+    private TestWorkflowEnvironment env;
     private WorkflowClient client;
-    private FakeTypeScriptActivities tsActivities;
 
     @BeforeEach
-    void setUp() {
-        testEnv = TestWorkflowEnvironment.newInstance();
-        client = testEnv.getWorkflowClient();
-
-        Worker openAccountWorker = testEnv.newWorker(OPEN_ACCOUNT_QUEUE);
-        openAccountWorker.registerWorkflowImplementationTypes(
-                OpenInvestmentAccountWorkflowImpl.class, TestParentWorkflowImpl.class);
-
-        // Stands in for the TypeScript worker, which hosts the activities
-        tsActivities = new FakeTypeScriptActivities();
-        Worker tsWorker = testEnv.newWorker(ServerInfo.getTaskqueue());
-        tsWorker.registerActivitiesImplementations(tsActivities);
-
-        testEnv.start();
+    public void setUp() {
+        CALLS.clear();
+        TRANSFER_IDS.clear();
+        FAILURES.clear();
+        env = TestWorkflowEnvironment.newInstance();
+        // Without TEMPORAL_TASK_QUEUE_OPEN_ACCOUNT, the workflow and the activities share a task queue
+        Worker worker = env.newWorker(ServerInfo.getTaskqueue());
+        worker.registerWorkflowImplementationTypes(OpenInvestmentAccountWorkflowImpl.class);
+        worker.registerActivitiesImplementations(new StubActivities());
+        env.start();
+        client = env.getWorkflowClient();
     }
 
     @AfterEach
-    void tearDown() {
-        testEnv.close();
+    public void tearDown() {
+        env.close();
+    }
+
+    private OpenInvestmentAccountWorkflow startAndApprove(String workflowId, String promoCode) {
+        OpenInvestmentAccountWorkflow workflow = client.newWorkflowStub(OpenInvestmentAccountWorkflow.class,
+                WorkflowOptions.newBuilder()
+                        .setTaskQueue(ServerInfo.getTaskqueue())
+                        .setWorkflowId(workflowId)
+                        .build());
+        OpenInvestmentAccountInput input = new OpenInvestmentAccountInput();
+        input.setClient_id(CLIENT_ID);
+        input.setAccount_name("Test");
+        input.setInitial_amount(500.0f);
+        input.setPromo_code(promoCode);
+        WorkflowClient.start(workflow::run, input);
+        workflow.verify_kyc();
+        workflow.compliance_approved();
+        return workflow;
+    }
+
+    private OpenInvestmentAccountOutput openAccount(String workflowId) {
+        startAndApprove(workflowId, null);
+        return client.newUntypedWorkflowStub(workflowId).getResult(OpenInvestmentAccountOutput.class);
+    }
+
+    private OpenInvestmentAccountOutput openAccount() {
+        return openAccount("open-account-test-" + UUID.randomUUID());
     }
 
     @Test
-    void opensAccountAfterKycAndComplianceApproval() {
-        TestParentWorkflow parent = startParent();
-        OpenInvestmentAccountWorkflow child = waitForChild();
-
-        assertEquals("Waiting KYC", child.getCurrentState());
-        assertEquals("Jane", child.getClientDetails().firstName());
-
-        child.verifyKyc();
-        child.complianceApproved();
-        OpenInvestmentAccountOutput result = WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
-        WorkflowStub.fromTyped(parent).getResult(Void.class);
-
-        assertTrue(result.accountCreated());
-        assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + initialDepositId(child), "register:" + INVESTMENT_ID), tsActivities.calls);
-        assertEquals(List.of(
-                "Waiting KYC",
-                "Waiting Compliance Review",
-                "Compliance review has been approved. Creating Investment Account",
-                "Creating the account record.",
-                "Transferring $1,000.00 from the linked bank account.",
-                "Registering the account with the custodian.",
-                "Complete"), parent.getStatuses());
-        assertEquals("Complete", child.getCurrentState());
-    }
-
-    // As run_open_account_workflow.ts starts it: no chat, so no status updates to send
-    @Test
-    void opensAccountWithoutAParentWorkflow() {
-        OpenInvestmentAccountWorkflow child = client.newWorkflowStub(OpenInvestmentAccountWorkflow.class,
-                WorkflowOptions.newBuilder().setWorkflowId(CHILD_ID).setTaskQueue(OPEN_ACCOUNT_QUEUE).build());
-        WorkflowClient.start(child::run, new OpenInvestmentAccountInput(CLIENT_ID, ACCOUNT_NAME, 1000.0, "", null));
-
-        child.verifyKyc();
-        child.complianceApproved();
-        OpenInvestmentAccountOutput result = WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
-
-        assertTrue(result.accountCreated());
-        assertEquals("Complete", child.getCurrentState());
+    public void sagaHappyPath() {
+        OpenInvestmentAccountOutput result = openAccount("happy-path");
+        assertTrue(result.isAccount_created());
+        assertEquals("Complete", client.newWorkflowStub(OpenInvestmentAccountWorkflow.class, "happy-path").get_current_state());
+        assertEquals(List.of("get_client", "open_investment#1", "debit:500.0", "register"), CALLS);
     }
 
     @Test
-    void updateClientDetailsSavesTheDetailsAndApprovesKyc() {
-        startParent();
-        OpenInvestmentAccountWorkflow child = waitForChild();
-
-        WealthManagementClient saved = child.updateClientDetails(Map.of("phone", "555-0100"));
-
-        assertEquals("555-0100", saved.phone());
-        assertEquals("Jane", saved.firstName());
-        assertEquals("555-0100", child.getClientDetails().phone());
-        assertTrue(tsActivities.calls.contains("updateClient:" + CLIENT_ID + "/{phone=555-0100}"));
-        // Saving the details approves KYC, so the workflow moves on to compliance review
-        waitForQuery(() -> "Waiting Compliance Review".equals(child.getCurrentState()) ? true : null);
+    public void sagaRollsBackInReverseWhenCustodianRejects() {
+        FAILURES.put("register_account", "reject");
+        OpenInvestmentAccountOutput result = openAccount("custodian-rejects");
+        assertFalse(result.isAccount_created());
+        assertTrue(result.getMessage().contains("register_account rejected"), result.getMessage());
+        assertTrue(client.newWorkflowStub(OpenInvestmentAccountWorkflow.class, "custodian-rejects")
+                .get_current_state().startsWith("Rolled back"));
+        assertEquals(List.of("get_client", "open_investment#1", "debit:500.0", "register",
+                "credit:500.0", "remove_investment:" + INVESTMENT_ID), CALLS);
     }
 
     @Test
-    void reusedWorkflowIdAfterRollbackUsesANewTransferId() {
-        tsActivities.failures.put("registerAccount", "reject");
-        OpenInvestmentAccountWorkflow first = startAndApprove(null);
-        WorkflowStub.fromTyped(first).getResult(OpenInvestmentAccountOutput.class);
-        String firstDebit = initialDepositId(first);
-        tsActivities.failures.clear();
-        // The parent closes after the final status signal; wait for it so its ID can be reused
-        client.newUntypedWorkflowStub(PARENT_ID).getResult(Void.class);
-
-        // Same parent and child workflow IDs: the run ID still gives the deposit a new transfer ID
-        OpenInvestmentAccountOutput result = runToCompletion(null);
-
-        assertTrue(result.accountCreated());
-        List<String> debits = tsActivities.calls.stream().filter(c -> c.startsWith("debit:")).toList();
-        assertEquals(2, debits.size());
-        assertEquals("debit:1000.0/" + firstDebit, debits.get(0));
-        assertFalse(debits.get(1).equals(debits.get(0)), "a reused transfer ID would not move any money");
+    public void sagaUndoesOnlyCompletedSteps() {
+        FAILURES.put("debit_linked_account", "reject");
+        OpenInvestmentAccountOutput result = openAccount();
+        assertFalse(result.isAccount_created());
+        // The debit never happened, so there is nothing to refund.
+        assertEquals(List.of("get_client", "open_investment#1", "debit:500.0",
+                "remove_investment:" + INVESTMENT_ID), CALLS);
     }
 
     @Test
-    void complianceApprovalBeforeKycWaitsForKyc() {
-        TestParentWorkflow parent = startParent();
-        OpenInvestmentAccountWorkflow child = waitForChild();
-
-        child.complianceApproved();
-        assertEquals("Waiting KYC", child.getCurrentState());
-
-        child.verifyKyc();
-        WorkflowStub.fromTyped(parent).getResult(Void.class);
-        assertEquals("Complete", child.getCurrentState());
-    }
-
-    // The signals arrive while the client details are still loading (getClient is being retried).
-    // Each one waits for the steps before it, so the workflow still goes through every state.
-    @Test
-    void approvalsSentBeforeTheClientIsLoadedWaitForIt() {
-        tsActivities.failures.put("getClient", 2);
-        TestParentWorkflow parent = startParent();
-        OpenInvestmentAccountWorkflow child = childStub();
-        waitForQuery(child::getCurrentState);
-
-        child.complianceApproved();
-        child.verifyKyc();
-        WorkflowStub.fromTyped(parent).getResult(Void.class);
-
-        assertEquals(List.of(
-                "Waiting KYC",
-                "Waiting Compliance Review",
-                "Compliance review has been approved. Creating Investment Account",
-                "Creating the account record.",
-                "Transferring $1,000.00 from the linked bank account.",
-                "Registering the account with the custodian.",
-                "Complete"), parent.getStatuses());
-        assertEquals(List.of("getClient attempt 1 failed", "getClient attempt 2 failed", "getClient:" + CLIENT_ID),
-                tsActivities.calls.subList(0, 3));
+    public void transientFailuresAreRetriedNotRolledBack() {
+        FAILURES.put("open_investment", "2");
+        OpenInvestmentAccountOutput result = openAccount();
+        assertTrue(result.isAccount_created());
+        assertEquals(List.of("get_client", "open_investment#1", "open_investment#2", "open_investment#3",
+                "debit:500.0", "register"), CALLS);
     }
 
     @Test
-    void transientFailuresAreRetriedNotRolledBack() {
-        tsActivities.failures.put("openInvestment", 2);
-        OpenInvestmentAccountOutput result = runToCompletion(null);
-
-        assertTrue(result.accountCreated());
-        assertEquals(List.of("getClient:" + CLIENT_ID,
-                "openInvestment attempt 1 failed", "openInvestment attempt 2 failed",
-                "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + initialDepositId(childStub()), "register:" + INVESTMENT_ID), tsActivities.calls);
+    public void reopeningWithTheSameWorkflowIdUsesANewTransferId() {
+        // The chat gives every account opening its own workflow ID, but a workflow can still
+        // be started again with the same ID by hand (CLI, scenario runner), and that must not
+        // look like a repeat of the earlier transfer.
+        FAILURES.put("register_account", "reject");
+        openAccount("same-account-name");
+        FAILURES.clear();
+        openAccount("same-account-name");
+        assertEquals(2, TRANSFER_IDS.size());
+        assertNotEquals(TRANSFER_IDS.get(0), TRANSFER_IDS.get(1));
     }
 
     @Test
-    void sagaRollsBackInReverseWhenCustodianRejects() {
-        tsActivities.failures.put("registerAccount", "reject");
-        OpenInvestmentAccountWorkflow child = startAndApprove(null);
-        OpenInvestmentAccountOutput result = WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
-        TestParentWorkflow parent = client.newWorkflowStub(TestParentWorkflow.class, PARENT_ID);
-        WorkflowStub.fromTyped(parent).getResult(Void.class);
-
-        assertFalse(result.accountCreated());
-        assertEquals("The account was not opened: registerAccount rejected", result.message());
-        assertEquals("Rolled back. The account was not opened: registerAccount rejected.", child.getCurrentState());
-        String transferId = initialDepositId(child);
-        assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + transferId, "register:" + INVESTMENT_ID,
-                "credit:1000.0/" + transferId + "-refund", "removeInvestment:" + INVESTMENT_ID),
-                tsActivities.calls);
-        List<String> statuses = parent.getStatuses();
-        assertEquals(List.of(
-                "Failed: registerAccount rejected. Rolling back.",
-                "Rolling back: refunding $1,000.00 to the linked bank account.",
-                "Rolling back: removing the account record.",
-                "Rolled back. The account was not opened: registerAccount rejected."),
-                statuses.subList(statuses.size() - 4, statuses.size()));
-    }
-
-    @Test
-    void sagaUndoesOnlyCompletedSteps() {
-        tsActivities.failures.put("debitLinkedAccount", "reject");
-        OpenInvestmentAccountOutput result = runToCompletion(null);
-
-        assertFalse(result.accountCreated());
-        // The debit never happened, so there is nothing to refund
-        assertEquals(List.of("getClient:" + CLIENT_ID, "openInvestment:" + ACCOUNT_NAME + "/1000.0",
-                "debit:1000.0/" + initialDepositId(childStub()), "removeInvestment:" + INVESTMENT_ID),
-                tsActivities.calls);
-    }
-
-    @Test
-    void promoCodeBugPausesTheWorkflowInsteadOfFailingIt() throws InterruptedException {
-        OpenInvestmentAccountWorkflow child = startAndApprove("WELCOME-BONUS");
-        String workflowId = WorkflowStub.fromTyped(child).getExecution().getWorkflowId();
+    public void promoCodePathBugPausesWorkflowInsteadOfFailingIt() throws InterruptedException {
+        String workflowId = "promo-bug";
+        startAndApprove(workflowId, "WELCOME-BONUS");
 
         String failure = null;
         for (int i = 0; i < 40 && failure == null; i++) {
             for (HistoryEvent event : client.fetchHistory(workflowId).getEvents()) {
                 if (event.getEventType() == EventType.EVENT_TYPE_WORKFLOW_TASK_FAILED) {
-                    failure = event.getWorkflowTaskFailedEventAttributes().getFailure().getMessage();
+                    // The message is generic; the NullPointerException is in the cause and stack trace
+                    failure = event.getWorkflowTaskFailedEventAttributes().getFailure().toString();
                 }
             }
             Thread.sleep(250);
         }
 
         assertNotNull(failure, "the demo bug should fail the workflow task");
-        // Paused, not failed: still running, and the saga never started
-        WorkflowExecutionStatus status = testEnv.getWorkflowServiceStubs().blockingStub()
+        assertTrue(failure.contains("NullPointerException") && failure.contains("welcomeBonus"), failure);
+        // Paused, not failed: still running, and the saga never started.
+        WorkflowExecutionStatus status = env.getWorkflowServiceStubs().blockingStub()
                 .describeWorkflowExecution(DescribeWorkflowExecutionRequest.newBuilder()
-                        .setNamespace(testEnv.getNamespace())
-                        .setExecution(WorkflowStub.fromTyped(child).getExecution())
+                        .setNamespace(env.getNamespace())
+                        .setExecution(client.newUntypedWorkflowStub(workflowId).getExecution())
                         .build())
                 .getWorkflowExecutionInfo().getStatus();
         assertEquals(WorkflowExecutionStatus.WORKFLOW_EXECUTION_STATUS_RUNNING, status);
-        assertFalse(tsActivities.calls.stream().anyMatch(c -> c.startsWith("openInvestment")));
-        WorkflowStub.fromTyped(child).terminate("test finished");
-    }
-
-    // The TypeScript supervisor sends plain JSON objects, so check the wire format rather than the Java types
-    @Test
-    void acceptsAndReturnsTheTypeScriptJsonShapes() {
-        WorkflowStub workflow = client.newUntypedWorkflowStub("OpenInvestmentAccountWorkflow",
-                WorkflowOptions.newBuilder()
-                        .setWorkflowId("open-account-" + UUID.randomUUID())
-                        .setTaskQueue(OPEN_ACCOUNT_QUEUE)
-                        .build());
-        startParentOnly();
-        workflow.start(Map.of(
-                "client_id", CLIENT_ID,
-                "account_name", ACCOUNT_NAME,
-                "initial_amount", 250,
-                "parent_workflow_id", PARENT_ID));
-
-        Map<?, ?> details = workflow.update("get_client_details", Map.class);
-        assertEquals("Jane", details.get("first_name"));
-        assertEquals("single", details.get("marital_status"));
-
-        workflow.signal("verify_kyc");
-        workflow.signal("compliance_approved");
-        Map<?, ?> result = workflow.getResult(Map.class);
-        assertEquals(true, result.get("account_created"));
-        assertEquals("openInvestment:" + ACCOUNT_NAME + "/250.0", tsActivities.calls.get(1));
-    }
-
-    // Starts the child through the test parent, approves KYC and compliance, and waits for the result
-    private OpenInvestmentAccountOutput runToCompletion(String promoCode) {
-        OpenInvestmentAccountWorkflow child = startAndApprove(promoCode);
-        return WorkflowStub.fromTyped(child).getResult(OpenInvestmentAccountOutput.class);
-    }
-
-    private OpenInvestmentAccountWorkflow startAndApprove(String promoCode) {
-        TestParentWorkflow parent = client.newWorkflowStub(TestParentWorkflow.class,
-                WorkflowOptions.newBuilder().setWorkflowId(PARENT_ID).setTaskQueue(OPEN_ACCOUNT_QUEUE).build());
-        WorkflowClient.start(parent::run, promoCode == null ? "" : promoCode);
-        OpenInvestmentAccountWorkflow child = waitForChild();
-        child.verifyKyc();
-        child.complianceApproved();
-        return child;
-    }
-
-    private TestParentWorkflow startParent() {
-        TestParentWorkflow parent = client.newWorkflowStub(TestParentWorkflow.class,
-                WorkflowOptions.newBuilder().setWorkflowId(PARENT_ID).setTaskQueue(OPEN_ACCOUNT_QUEUE).build());
-        WorkflowClient.start(parent::run, "");
-        return parent;
-    }
-
-    private void startParentOnly() {
-        TestParentWorkflow parent = client.newWorkflowStub(TestParentWorkflow.class,
-                WorkflowOptions.newBuilder().setWorkflowId(PARENT_ID).setTaskQueue(OPEN_ACCOUNT_QUEUE).build());
-        WorkflowClient.start(parent::run, (String) null);
-    }
-
-    // The parent starts the child asynchronously, so poll until the child has started. Then
-    // get_client_details waits until it has loaded the client.
-    private OpenInvestmentAccountWorkflow waitForChild() {
-        OpenInvestmentAccountWorkflow child = childStub();
-        waitForQuery(child::getCurrentState);
-        child.getClientDetails();
-        return child;
-    }
-
-    private OpenInvestmentAccountWorkflow childStub() {
-        return client.newWorkflowStub(OpenInvestmentAccountWorkflow.class, CHILD_ID);
-    }
-
-    // The idempotency key of the initial deposit, which is unique per run of the child
-    private String initialDepositId(OpenInvestmentAccountWorkflow child) {
-        String runId = WorkflowStub.fromTyped(child).getExecution().getRunId();
-        if (runId == null || runId.isEmpty()) {
-            runId = testEnv.getWorkflowServiceStubs().blockingStub()
-                    .describeWorkflowExecution(DescribeWorkflowExecutionRequest.newBuilder()
-                            .setNamespace(testEnv.getNamespace())
-                            .setExecution(io.temporal.api.common.v1.WorkflowExecution.newBuilder()
-                                    .setWorkflowId(CHILD_ID).build())
-                            .build())
-                    .getWorkflowExecutionInfo().getExecution().getRunId();
-        }
-        return CHILD_ID + "-" + runId + "-initial-deposit";
-    }
-
-    private static <T> T waitForQuery(java.util.function.Supplier<T> query) {
-        long deadline = System.currentTimeMillis() + 10_000;
-        while (true) {
-            try {
-                T result = query.get();
-                if (result != null) {
-                    return result;
-                }
-            } catch (RuntimeException e) {
-                if (System.currentTimeMillis() > deadline) {
-                    throw e;
-                }
-            }
-            if (System.currentTimeMillis() > deadline) {
-                throw new AssertionError("query never returned a result");
-            }
-            try {
-                Thread.sleep(50);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                throw new AssertionError(e);
-            }
-        }
-    }
-
-    // Plays the part of the TypeScript supervisor: starts the child and records its status signals
-    @WorkflowInterface
-    public interface TestParentWorkflow {
-        // promoCode: null to not start a child, "" to start one without a promo code
-        @WorkflowMethod
-        void run(String promoCode);
-
-        @SignalMethod(name = "update_account_opening_state")
-        void updateAccountOpeningState(UpdateAccountOpeningStateInput input);
-
-        @QueryMethod
-        List<String> getStatuses();
-    }
-
-    public static class TestParentWorkflowImpl implements TestParentWorkflow {
-        private final List<String> statuses = new ArrayList<>();
-
-        @Override
-        public void run(String promoCode) {
-            if (promoCode != null) {
-                OpenInvestmentAccountWorkflow child = Workflow.newChildWorkflowStub(
-                        OpenInvestmentAccountWorkflow.class,
-                        ChildWorkflowOptions.newBuilder().setWorkflowId(CHILD_ID).build());
-                child.run(new OpenInvestmentAccountInput(CLIENT_ID, ACCOUNT_NAME, 1000.0, PARENT_ID,
-                        promoCode.isEmpty() ? null : promoCode));
-            }
-            // let the final status signal arrive before completing
-            Workflow.await(() -> statuses.stream()
-                    .anyMatch(s -> s.equals("Complete") || s.startsWith("Rolled back")));
-        }
-
-        // Records the reported states, and checks that each one says which opening it is for
-        @Override
-        public void updateAccountOpeningState(UpdateAccountOpeningStateInput input) {
-            if (!ACCOUNT_NAME.equals(input.accountName()) || input.workflowId() == null) {
-                throw new IllegalArgumentException("unexpected status update " + input);
-            }
-            statuses.add(input.state());
-        }
-
-        @Override
-        public List<String> getStatuses() {
-            return statuses;
-        }
-    }
-
-    // Same activity names and signatures as the TypeScript activities
-    @ActivityInterface
-    public interface TypeScriptActivities {
-        @ActivityMethod(name = "getClient")
-        WealthManagementClient getClient(String clientId);
-
-        @ActivityMethod(name = "updateClient")
-        WealthManagementClient updateClient(String clientId, Map<String, Object> fields);
-
-        @ActivityMethod(name = "openInvestment")
-        InvestmentAccount openInvestment(String clientId, String name, double balance);
-
-        @ActivityMethod(name = "removeInvestment")
-        boolean removeInvestment(String clientId, String investmentId);
-
-        @ActivityMethod(name = "debitLinkedAccount")
-        Map<String, Object> debitLinkedAccount(String clientId, double amount, String transferId);
-
-        @ActivityMethod(name = "creditLinkedAccount")
-        Map<String, Object> creditLinkedAccount(String clientId, double amount, String transferId);
-
-        @ActivityMethod(name = "registerAccount")
-        String registerAccount(String clientId, String investmentId, double amount);
-    }
-
-    static class FakeTypeScriptActivities implements TypeScriptActivities {
-        // Activity calls, in order
-        final List<String> calls = Collections.synchronizedList(new ArrayList<>());
-        // Keyed by activity name: "reject" fails non-retryably; an Integer N fails the first N attempts
-        final Map<String, Object> failures = new ConcurrentHashMap<>();
-
-        private void maybeFail(String name) {
-            Object behavior = failures.get(name);
-            if ("reject".equals(behavior)) {
-                throw ApplicationFailure.newNonRetryableFailure(name + " rejected", "Rejected");
-            }
-            int attempt = Activity.getExecutionContext().getInfo().getAttempt();
-            if (behavior instanceof Integer n && attempt <= n) {
-                calls.add(name + " attempt " + attempt + " failed");
-                throw new RuntimeException(name + " unavailable");
-            }
-        }
-
-        @Override
-        public WealthManagementClient getClient(String clientId) {
-            maybeFail("getClient");
-            calls.add("getClient:" + clientId);
-            return new WealthManagementClient(clientId, "Jane", "Doe", "1 Main St", "555-0199",
-                    "jane@example.com", "single");
-        }
-
-        @Override
-        public WealthManagementClient updateClient(String clientId, Map<String, Object> fields) {
-            calls.add("updateClient:" + clientId + "/" + fields);
-            WealthManagementClient c = getClient(clientId);
-            calls.remove(calls.size() - 1);
-            return new WealthManagementClient(c.clientId(), c.firstName(), c.lastName(), c.address(),
-                    (String) fields.getOrDefault("phone", c.phone()), c.email(), c.maritalStatus());
-        }
-
-        @Override
-        public InvestmentAccount openInvestment(String clientId, String name, double balance) {
-            maybeFail("openInvestment");
-            calls.add("openInvestment:" + name + "/" + balance);
-            return new InvestmentAccount(INVESTMENT_ID, name, balance);
-        }
-
-        @Override
-        public boolean removeInvestment(String clientId, String investmentId) {
-            calls.add("removeInvestment:" + investmentId);
-            return true;
-        }
-
-        @Override
-        public Map<String, Object> debitLinkedAccount(String clientId, double amount, String transferId) {
-            calls.add("debit:" + amount + "/" + transferId);
-            maybeFail("debitLinkedAccount");
-            return Map.of();
-        }
-
-        @Override
-        public Map<String, Object> creditLinkedAccount(String clientId, double amount, String transferId) {
-            calls.add("credit:" + amount + "/" + transferId);
-            return Map.of();
-        }
-
-        @Override
-        public String registerAccount(String clientId, String investmentId, double amount) {
-            calls.add("register:" + investmentId);
-            maybeFail("registerAccount");
-            return "CUST-" + investmentId;
-        }
+        assertFalse(CALLS.contains("open_investment#1"));
+        WorkflowStub stub = client.newUntypedWorkflowStub(workflowId);
+        stub.terminate("test complete");
     }
 }

@@ -55,17 +55,17 @@ describe('Agent handoffs (live Gemini)', function () {
       activities: {
         ...activities,
         // Model calls on this worker's queue, and the conversation kept in memory instead of Redis
-        async getLlmTaskQueue() {
+        async get_llm_task_queue() {
           return TASK_QUEUE;
         },
-        async appendChatInteraction(_workflowId: string, interaction: ChatInteraction) {
+        async append_chat_interaction(_workflowId: string, interaction: ChatInteraction) {
           interactions.push(interaction);
           return interactions.length;
         },
-        async appendStatusUpdate() {
+        async append_status_update() {
           return 0;
         },
-        async deleteConversation() {
+        async delete_conversation() {
           return true;
         },
       },

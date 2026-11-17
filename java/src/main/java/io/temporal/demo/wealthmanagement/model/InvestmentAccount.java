@@ -1,10 +1,16 @@
 package io.temporal.demo.wealthmanagement.model;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.Setter;
 
-// Result of the openInvestment activity (InvestmentAccount in src/common/investment-manager.ts)
-public record InvestmentAccount(
-        @JsonProperty("investment_id") String investmentId,
-        String name,
-        double balance) {
+@Getter
+@Setter
+@AllArgsConstructor
+public class InvestmentAccount {
+    @JsonProperty("client_id")
+    private String clientId;
+    private String name;
+    private double balance;
 }
