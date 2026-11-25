@@ -1,3 +1,11 @@
+> [!IMPORTANT]
+> **This repository is no longer maintained.** The Vercel AI SDK version of the Wealth Management demo now lives in
+> [temporal-sa/wealth-management-demo](https://github.com/temporal-sa/wealth-management-demo), under
+> [`src/typescript/vercel_ai`](https://github.com/temporal-sa/wealth-management-demo/tree/main/src/typescript/vercel_ai). There it sits
+> alongside the same demo in twelve other agent frameworks across Python, TypeScript, Go, Java and .NET, with one shared
+> web UI and new features such as a chaos panel for injecting failures. New work, fixes and SDK upgrades happen there;
+> this repository is kept as it is for reference.
+
 # Wealth Management Agent Example using Vercel AI SDK
 
 A multi-agent wealth-management demo built with the [Vercel AI SDK](https://ai-sdk.dev) and [Temporal](https://temporal.io).
